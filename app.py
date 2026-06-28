@@ -796,12 +796,14 @@ def fetch_df(symbol, days_back_rows=300, table="live_candles") -> pd.DataFrame:
 
 def auto_sync_if_stale(active_sec_id, active_seg, active_inst, display_name,
                         days_back, interval, cleanup_days, auto_sync_mins, mode_label, data_mode):
-    sync_key = f"last_sync_{active_sec_id}_{data_mode}"
+    # Check the correct table for this mode
+    target_table = "candles_1d" if data_mode == "Daily (Swing)" else "live_candles"
+    sync_key = f"last_sync_{active_sec_id}_{target_table}"
     last_sync = st.session_state.get(sync_key)
     if last_sync and (datetime.now() - last_sync).total_seconds() < auto_sync_mins * 60:
         return
     try:
-        res = supabase.table("live_candles").select("timestamp") \
+        res = supabase.table(target_table).select("timestamp") \
             .eq("symbol", str(active_sec_id)).order("timestamp", desc=True).limit(1).execute()
     except Exception:
         return
@@ -816,7 +818,8 @@ def auto_sync_if_stale(active_sec_id, active_seg, active_inst, display_name,
             st.info(f"⏰ Data {int(age.total_seconds()//60)}m old — auto-syncing…")
     if should_sync:
         ok = sync_data(str(active_sec_id), active_seg, active_inst, display_name,
-                       days_back, interval, cleanup_days, show_status=True)
+                       days_back, interval, cleanup_days,
+                       table=target_table, show_status=True)
         if ok:
             st.session_state[sync_key] = datetime.now()
     else:
@@ -888,60 +891,65 @@ with st.sidebar:
 
 # ==================== MANUAL SYNC ====================
 if sync_clicked:
-    sync_data(str(active_sec_id), active_seg, active_inst, display_name,
-              days_back, interval, cleanup_days)
+    if data_mode == "Daily (Swing)":
+        # Daily mode: refresh the 1D candles table
+        sync_data(str(active_sec_id), active_seg, active_inst, display_name,
+                  200, None, 200, table="candles_1d")
+    else:
+        # Intraday mode: refresh the 5m candles table
+        sync_data(str(active_sec_id), active_seg, active_inst, display_name,
+                  7, "5", 7, table="live_candles")
 
-auto_sync_if_stale(active_sec_id, active_seg, active_inst, display_name,
-                   days_back, interval, cleanup_days, auto_sync_mins, mode_label, data_mode)
+# Auto-sync targets the mode-appropriate primary table
+if data_mode == "Daily (Swing)":
+    auto_sync_if_stale(active_sec_id, active_seg, active_inst, display_name,
+                       200, None, 200, auto_sync_mins, mode_label, data_mode)
+else:
+    auto_sync_if_stale(active_sec_id, active_seg, active_inst, display_name,
+                       7, "5", 7, auto_sync_mins, mode_label, data_mode)
 
 # ==================== LOAD DATA ====================
-with st.spinner("Loading data…"):
-    df_5m = fetch_df(active_sec_id, 300, "live_candles")
+# Table layout (fixed, mode-independent):
+#   live_candles  → 5m intraday candles  (7 days)
+#   candles_1h    → 1H candles           (30 days)
+#   candles_1d    → daily candles        (200 days)
+#
+# Daily mode uses candles_1d for its chart — NOT live_candles.
+# This prevents the two modes from overwriting each other in the same table.
 
-    # Always load 1H and 1D from their dedicated tables — never resample from 5m.
-    # Resampling 7d of 5m data into 1D gives only ~5 bars which breaks EMA_50
-    # and causes false MTF conflicts in Intraday mode.
-    df_1h = fetch_df(active_sec_id, 200, "candles_1h")
-    df_1d = fetch_df(active_sec_id, 150, "candles_1d")
+with st.spinner("Loading data…"):
+    df_5m = fetch_df(active_sec_id, 300, "live_candles")   # 5m always
+    df_1h = fetch_df(active_sec_id, 200, "candles_1h")     # 1H always
+    df_1d = fetch_df(active_sec_id, 150, "candles_1d")     # daily always
+
+    # Pick the primary display frame based on mode
+    # Daily mode → show daily candles on chart; Intraday → show 5m candles
+    df_primary = df_1d if data_mode == "Daily (Swing)" else df_5m
 
     mtf_warning = None
+    missing = []
+    if df_5m.empty:  missing.append("5m (click Sync Now)")
+    if df_1h.empty:  missing.append("1H")
+    if df_1d.empty:  missing.append("1D")
 
-    if df_1h.empty or df_1d.empty:
-        # Tables not populated yet — tell user exactly what to do
-        missing = []
-        if df_1h.empty: missing.append("1H")
-        if df_1d.empty: missing.append("1D")
+    if missing:
         mtf_warning = (
-            f"⚠️ {' and '.join(missing)} candle data missing. "
-            f"Click **Sync All Timeframes** in the sidebar to populate MTF signals. "
-            f"Until then, MTF alignment is unavailable."
+            f"⚠️ Missing data: {', '.join(missing)}. "
+            f"Click **Sync All Timeframes** to populate all tables. "
+            f"In Daily mode only 1D data is needed for the chart; MTF needs all three."
         )
-        # Last-resort fallback: resample only if we have enough 5m bars
-        # 1H needs ≥50 candles × 12 (5m per hour) = 600 bars minimum
-        # 1D needs ≥60 candles × 288 (5m per day) = impractical — skip 1D fallback
-        if df_1h.empty and len(df_5m) >= 600:
-            df_1h = (
-                df_5m.set_index("timestamp")
-                .resample("1h")
-                .agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"})
-                .dropna()
-                .reset_index()
-            )
-            if len(df_1h) < 20:
-                df_1h = pd.DataFrame()  # too few bars — discard
 
     for _df in [df_5m, df_1h, df_1d]:
         if not _df.empty:
             AdvancedQuantEngine.compute_indicators(_df)
 
     vix      = fetch_india_vix()
-    # PCR is instrument-level (not mode-dependent) — always fetch for eligible segments
     pcr_data = fetch_option_chain_pcr(active_sec_id) if is_options_eligible else {}
 
 # NSE option chain used for PCR — no debug expander needed
 
 copilot = AdvancedQuantEngine.process_ai_copilot(
-    df_5m, df_1h, df_1d,
+    df_primary, df_1h, df_1d,
     is_options_eligible=is_options_eligible,
     vix=vix, pcr_data=pcr_data,
     security_id=str(active_sec_id),
@@ -995,32 +1003,37 @@ with col_left:
     tab_chart, tab_journal, tab_sizing = st.tabs(["📈 Chart", "📓 Signal Journal", "💰 Position Sizing"])
 
     with tab_chart:
+        chart_df    = df_primary if not df_primary.empty else (df_1d if not df_1d.empty else pd.DataFrame())
+        chart_label = "Daily" if data_mode == "Daily (Swing)" else "5m"
+        if chart_df.empty:
+            st.warning("No chart data. Click Sync All Timeframes.")
+            st.stop()
         fig = make_subplots(
             rows=3, cols=1, shared_xaxes=True,
             vertical_spacing=0.04,
             row_heights=[0.60, 0.20, 0.20],
-            subplot_titles=("Price Action + VWAP", "Volume", "RSI"),
+            subplot_titles=(f"Price Action + VWAP ({chart_label})", "Volume", "RSI"),
         )
         # Candles
         fig.add_trace(go.Candlestick(
-            x=df_5m["timestamp"],
-            open=df_5m["open"], high=df_5m["high"], low=df_5m["low"], close=df_5m["close"],
+            x=chart_df["timestamp"],
+            open=chart_df["open"], high=chart_df["high"], low=chart_df["low"], close=chart_df["close"],
             name="Candles", increasing_line_color="#3fb950", decreasing_line_color="#f85149",
         ), row=1, col=1)
 
         # EMAs
         for col_name, color, label in [("EMA_9","#d2a8ff","EMA 9"),("EMA_20","#ffa657","EMA 20"),("EMA_50","#58a6ff","EMA 50")]:
-            if col_name in df_5m.columns:
-                fig.add_trace(go.Scatter(x=df_5m["timestamp"], y=df_5m[col_name], name=label,
+            if col_name in chart_df.columns:
+                fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df[col_name], name=label,
                                          line=dict(color=color, width=1.5)), row=1, col=1)
 
         # VWAP + bands
-        if "VWAP" in df_5m.columns:
-            fig.add_trace(go.Scatter(x=df_5m["timestamp"], y=df_5m["VWAP"], name="VWAP",
+        if "VWAP" in chart_df.columns:
+            fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VWAP"], name="VWAP",
                                      line=dict(color="#e3b341", width=2, dash="dot")), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_5m["timestamp"], y=df_5m["VWAP_U1"], name="VWAP +1σ",
+            fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VWAP_U1"], name="VWAP +1σ",
                                      line=dict(color="rgba(227,179,65,0.35)", width=1, dash="dash")), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_5m["timestamp"], y=df_5m["VWAP_L1"], name="VWAP -1σ",
+            fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VWAP_L1"], name="VWAP -1σ",
                                      line=dict(color="rgba(227,179,65,0.35)", width=1, dash="dash"),
                                      fill="tonexty", fillcolor="rgba(227,179,65,0.04)"), row=1, col=1)
 
@@ -1031,15 +1044,15 @@ with col_left:
             fig.add_hline(y=s, line_dash="dot", line_color="rgba(46,160,67,0.4)", line_width=1, row=1, col=1)
 
         # Volume
-        colors = ["#3fb950" if df_5m["close"].iloc[i] >= df_5m["open"].iloc[i] else "#f85149" for i in range(len(df_5m))]
-        fig.add_trace(go.Bar(x=df_5m["timestamp"], y=df_5m["volume"], name="Volume", marker_color=colors), row=2, col=1)
-        if "VMA_20" in df_5m.columns:
-            fig.add_trace(go.Scatter(x=df_5m["timestamp"], y=df_5m["VMA_20"], name="Vol MA",
+        colors = ["#3fb950" if chart_df["close"].iloc[i] >= chart_df["open"].iloc[i] else "#f85149" for i in range(len(df_5m))]
+        fig.add_trace(go.Bar(x=chart_df["timestamp"], y=chart_df["volume"], name="Volume", marker_color=colors), row=2, col=1)
+        if "VMA_20" in chart_df.columns:
+            fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VMA_20"], name="Vol MA",
                                      line=dict(color="#8b949e", width=1)), row=2, col=1)
 
         # RSI
-        if "RSI" in df_5m.columns:
-            fig.add_trace(go.Scatter(x=df_5m["timestamp"], y=df_5m["RSI"], name="RSI",
+        if "RSI" in chart_df.columns:
+            fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["RSI"], name="RSI",
                                      line=dict(color="#58a6ff", width=1.5)), row=3, col=1)
             fig.add_hline(y=70, line_dash="dot", line_color="rgba(248,81,73,0.5)",  line_width=1, row=3, col=1)
             fig.add_hline(y=30, line_dash="dot", line_color="rgba(46,160,67,0.5)",  line_width=1, row=3, col=1)
@@ -1301,14 +1314,14 @@ with col_right:
 
     # ── Key stats ──────────────────────────────────────────────────────────────
     st.markdown("### 📈 Key Stats")
-    last = df_5m.iloc[-1]
+    last = chart_df.iloc[-1] if not chart_df.empty else df_1d.iloc[-1] if not df_1d.empty else pd.Series()
     stats = {
         "High":   round(last["high"], 2),
         "Low":    round(last["low"], 2),
         "Volume": f"{int(last['volume']):,}",
-        "RSI":    round(last["RSI"], 1) if "RSI" in df_5m.columns else "-",
-        "ATR":    round(last["ATR"], 2) if "ATR" in df_5m.columns else "-",
-        "VWAP":   round(last["VWAP"], 2) if "VWAP" in df_5m.columns and not pd.isna(last.get("VWAP")) else "-",
+        "RSI":    round(last["RSI"], 1) if "RSI" in chart_df.columns else "-",
+        "ATR":    round(last["ATR"], 2) if "ATR" in chart_df.columns else "-",
+        "VWAP":   round(last["VWAP"], 2) if "VWAP" in chart_df.columns and not pd.isna(last.get("VWAP")) else "-",
     }
     stat_cols = st.columns(2)
     for i, (k, v) in enumerate(stats.items()):
