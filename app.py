@@ -19,7 +19,7 @@ st.markdown("""
 
 # --- SECRETS & CLOUD INITIALIZATION ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
-# FIX: Prefer the SERVICE_ROLE key to bypass RLS, fallback to anon key if not set
+# Prefer SERVICE_ROLE key to bypass RLS; fallback to anon key if not set
 SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_KEY", st.secrets.get("SUPABASE_KEY", ""))
 DHAN_ACCESS_TOKEN = st.secrets.get("DHAN_ACCESS_TOKEN", "")
 
@@ -205,40 +205,41 @@ else:
 
 st.sidebar.divider()
 
+# --- SYNC BUTTON WITH ALL FIXES ---
 if st.sidebar.button("🔄 Sync Market Data Vector"):
     with st.spinner(f"Pulling historical data for {display_name}..."):
         candles = pull_historical_dhan(active_sec_id, active_seg, active_inst)
         if candles:
             try:
-                # --- FIX 1: Build a LIST of payloads instead of upserting one by one ---
-                # This is MUCH faster and properly handles the upsert contract.
+                # Build a LIST of payloads (expected by supabase upsert)
                 payload_list = []
                 for candle in candles:
+                    # Convert volume to int (Dhan returns as float with .0)
+                    # Also ensure all numeric fields are proper floats
                     payload_list.append({
                         "symbol": str(active_sec_id),
                         "timestamp": candle["timestamp"],
-                        "open": candle["open"],
-                        "high": candle["high"],
-                        "low": candle["low"],
-                        "close": candle["close"],
-                        "volume": candle["volume"]
+                        "open": float(candle["open"]),
+                        "high": float(candle["high"]),
+                        "low": float(candle["low"]),
+                        "close": float(candle["close"]),
+                        "volume": int(candle["volume"])   # critical fix
                     })
                 
-                # --- FIX 2: Pass the LIST and catch potential API errors ---
+                # Upsert all at once
                 supabase.table("live_candles").upsert(payload_list, on_conflict="symbol,timestamp").execute()
                 st.sidebar.success(f"✅ Synced {len(payload_list)} candles to cloud.")
             
             except Exception as e:
-                # --- FIX 3: Display the actual Supabase error to the user ---
+                # Show the actual Supabase error
                 error_msg = e.args[0] if e.args else str(e)
                 st.sidebar.error(f"❌ Supabase Error: {error_msg}")
-                # If you want to see the full raw error in the logs:
+                # If you want the full traceback in logs:
                 # st.exception(e)
         else:
             st.sidebar.warning("Fetch failed. Ensure market is open or check API credentials.")
 
 # --- DASHBOARD RENDER ---
-# Pull data based on the Active Security ID
 response = supabase.table("live_candles").select("*").eq("symbol", str(active_sec_id)).order("timestamp", desc=True).limit(300).execute()
 raw_candles = response.data
 
