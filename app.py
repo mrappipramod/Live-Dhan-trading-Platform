@@ -943,20 +943,17 @@ with st.spinner("Loading data…"):
     df_1h = fetch_df(active_sec_id, 200, "candles_1h")     # 1H always
     df_1d = fetch_df(active_sec_id, 150, "candles_1d")     # daily always
 
-mtf_warning = None
-    counts = {"5m": len(df_5m), "1H": len(df_1h), "1D": len(df_1d)}
-    problems = []
-    for tf, n in counts.items():
-        if n == 0:
-            problems.append(f"{tf}: empty")
-        elif n < 16:                       # RSI(14) needs ~16 bars to be meaningful
-            problems.append(f"{tf}: only {n} rows (need ≥16)")
+    mtf_warning = None
+    missing = []
+    if df_5m.empty:  missing.append("5m (click Sync Now)")
+    if df_1h.empty:  missing.append("1H")
+    if df_1d.empty:  missing.append("1D")
 
-    if problems:
+    if missing:
         mtf_warning = (
-            "⚠️ Not enough candles — " + " · ".join(problems) +
-            ". Click **Sync All Timeframes** and confirm the green success message. "
-            "Row counts: " + " · ".join(f"{k}={v}" for k, v in counts.items())
+            f"⚠️ Missing data: {', '.join(missing)}. "
+            f"Click **Sync All Timeframes** to populate all tables. "
+            f"In Daily mode only 1D data is needed for the chart; MTF needs all three."
         )
 
     # FIX #5/#3: reassign the returned frames and pass the intraday flag so
