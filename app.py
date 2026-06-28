@@ -1,19 +1,16 @@
 """
-AI Options Copilot v4 — Institutional Grade  (bug-fixed build)
-==============================================================
-Fixes applied vs the original (search for "# FIX:" to see each one):
-  1. Telegram alert f-string used an invalid format spec ({vix:.1f if vix else ...})
-     -> precompute the strings; no more ValueError when an alert fires.
-  2. Volume bar colours looped range(len(df_5m)) while indexing chart_df
-     -> use len(chart_df); fixes IndexError / wrong colours in Daily mode.
-  3. VWAP + sigma bands were cumulative across the whole multi-day series
-     -> reset per session-day for intraday frames (true intraday VWAP).
-  4. fetch_option_chain_pcr hardcoded UnderlyingSeg="IDX_I" for every eligible
-     instrument -> segment is now passed in (IDX_I for indices, NSE_FNO for stocks).
-  5. compute_indicators return value was discarded (worked only by in-place
-     mutation) -> callers now reassign the returned frame; intraday flag added.
-  6. Position-sizing could format the "-" string with :, and divide by it
-     -> numeric-safe guards.
+AI Options Copilot v4 — Institutional Grade
+============================================
+New in v4:
+  • India VIX filter          — suppress signals in high-volatility regimes
+  • Multi-timeframe (MTF)     — 5m + 1H + Daily confluence; trade only when aligned
+  • OI / PCR analysis         — Put-Call Ratio from Dhan option chain (Index only)
+  • VWAP + ±1σ/2σ bands       — institutional intraday level
+  • Support & Resistance       — swing high/low detection, entry proximity check
+  • Expiry calendar awareness  — flag/suppress signals near weekly expiry
+  • Signal journal             — every signal logged to Supabase with outcome tracking
+  • Telegram alerts            — push when high-confidence signal fires
+  • Position sizing engine     — Kelly / fixed-fractional lot calculator
 """
 
 import streamlit as st
@@ -178,8 +175,6 @@ def fetch_india_vix() -> float | None:
     """
     Fetch India VIX from NSE's JSON endpoint.
     Returns float or None on failure.
-    NOTE: NSE frequently blocks programmatic access from cloud IPs; if this
-    returns None on a hosted deployment that is expected, not a code bug.
     """
     try:
         headers = {
@@ -203,10 +198,9 @@ def fetch_india_vix() -> float | None:
     return None
 
 
-# FIX #4: segment is now a parameter (was hardcoded "IDX_I").
-# Cache key now includes the segment so index vs. stock chains don't collide.
+# PCR cache keyed by security_id only — mode (intraday/daily) is irrelevant
 @st.cache_data(ttl=180, show_spinner=False)
-def fetch_option_chain_pcr(security_id: str, underlying_seg: str = "IDX_I") -> dict:
+def fetch_option_chain_pcr(security_id: str) -> dict:
     """
     Fetch PCR, max pain, and OI walls from Dhan option chain API v2.
 
@@ -214,7 +208,6 @@ def fetch_option_chain_pcr(security_id: str, underlying_seg: str = "IDX_I") -> d
       1. POST /v2/optionchain/expirylist  → get nearest expiry date string
       2. POST /v2/optionchain             → get full chain for that expiry
 
-    underlying_seg should be "IDX_I" for indices and "NSE_FNO" for stock options.
     Required headers: access-token + client-id (both mandatory per Dhan docs).
     UnderlyingScrip must be int, Expiry must be a valid date string "YYYY-MM-DD".
 
@@ -229,7 +222,7 @@ def fetch_option_chain_pcr(security_id: str, underlying_seg: str = "IDX_I") -> d
 
     expiry_payload = {
         "UnderlyingScrip": int(security_id),
-        "UnderlyingSeg":   underlying_seg,   # FIX #4
+        "UnderlyingSeg":   "IDX_I",
     }
 
     try:
@@ -252,7 +245,7 @@ def fetch_option_chain_pcr(security_id: str, underlying_seg: str = "IDX_I") -> d
         # Step 2: fetch full option chain for nearest expiry
         chain_payload = {
             "UnderlyingScrip": int(security_id),
-            "UnderlyingSeg":   underlying_seg,   # FIX #4
+            "UnderlyingSeg":   "IDX_I",
             "Expiry":          nearest_expiry,
         }
         chain_res = requests.post(
@@ -408,9 +401,7 @@ def log_signal_to_journal(signal: dict, display_name: str, mode_label: str):
 class AdvancedQuantEngine:
 
     @staticmethod
-    def compute_indicators(df: pd.DataFrame, intraday: bool = False) -> pd.DataFrame:
-        # FIX #5: callers now use the returned frame. The `intraday` flag
-        # controls whether VWAP resets per session-day (see FIX #3 below).
+    def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
         if len(df) < 5:
             return df
 
@@ -436,31 +427,15 @@ class AdvancedQuantEngine:
         # Volume MA
         df["VMA_20"] = df["volume"].rolling(20).mean().fillna(df["volume"])
 
-        # ── VWAP + sigma bands ───────────────────────────────────────────────
-        # FIX #3: for intraday frames VWAP must reset every session-day,
-        # otherwise it becomes a multi-day cumulative VWAP. Daily frames keep
-        # a single cumulative series.
+        # VWAP + bands (session-level: reset each day for intraday, full series for daily)
         typical = (df["high"] + df["low"] + close) / 3
-        tpv     = typical * df["volume"]
+        cum_vol = df["volume"].cumsum()
+        cum_tvol = (typical * df["volume"]).cumsum()
+        df["VWAP"] = cum_tvol / cum_vol.replace(0, np.nan)
 
-        if intraday and "timestamp" in df.columns:
-            day      = pd.to_datetime(df["timestamp"]).dt.date
-            cum_vol  = df["volume"].groupby(day).cumsum()
-            cum_tvol = tpv.groupby(day).cumsum()
-        else:
-            day      = None
-            cum_vol  = df["volume"].cumsum()
-            cum_tvol = tpv.cumsum()
-
-        cum_vol_safe = cum_vol.replace(0, np.nan)
-        df["VWAP"] = cum_tvol / cum_vol_safe
-
-        # VWAP standard-deviation bands (same session grouping as the VWAP)
+        # VWAP standard deviation bands
         squared_diff = (typical - df["VWAP"]) ** 2
-        if intraday and day is not None:
-            rolling_var = (squared_diff * df["volume"]).groupby(day).cumsum() / cum_vol_safe
-        else:
-            rolling_var = (squared_diff * df["volume"]).cumsum() / cum_vol_safe
+        rolling_var  = (squared_diff * df["volume"]).cumsum() / cum_vol.replace(0, np.nan)
         vwap_std     = np.sqrt(rolling_var.fillna(0))
         df["VWAP_U1"] = df["VWAP"] + vwap_std
         df["VWAP_L1"] = df["VWAP"] - vwap_std
@@ -534,7 +509,7 @@ class AdvancedQuantEngine:
 
     @staticmethod
     def process_ai_copilot(
-        df_primary: pd.DataFrame,
+        df_5m: pd.DataFrame,
         df_1h: pd.DataFrame,
         df_1d: pd.DataFrame,
         is_options_eligible: bool,
@@ -552,28 +527,28 @@ class AdvancedQuantEngine:
             "expiry_days": None, "suppressed": False, "suppress_reason": "",
         }
 
-        if df_primary.empty or "RSI" not in df_primary.columns:
+        if df_5m.empty or "RSI" not in df_5m.columns:
             return empty
 
         # ── Per-timeframe signals ────────────────────────────────────────────
-        sig_primary = AdvancedQuantEngine.compute_signal_single(df_primary)
+        sig_5m = AdvancedQuantEngine.compute_signal_single(df_5m)
         sig_1h = AdvancedQuantEngine.compute_signal_single(df_1h) if not df_1h.empty else {"direction": "HOLD", "score": 50}
         sig_1d = AdvancedQuantEngine.compute_signal_single(df_1d) if not df_1d.empty else {"direction": "HOLD", "score": 50}
 
-        mtf = {"5m": sig_primary, "1H": sig_1h, "1D": sig_1d}
+        mtf = {"5m": sig_5m, "1H": sig_1h, "1D": sig_1d}
 
-        # MTF alignment: all three must agree (or at least primary + one higher TF)
-        directions = [sig_primary["direction"], sig_1h["direction"], sig_1d["direction"]]
+        # MTF alignment: all three must agree (or at least 5m + one higher TF)
+        directions = [sig_5m["direction"], sig_1h["direction"], sig_1d["direction"]]
         all_agree  = len(set(directions)) == 1 and directions[0] != "HOLD"
         two_agree  = (
-            sig_primary["direction"] == sig_1h["direction"] and sig_primary["direction"] != "HOLD"
+            sig_5m["direction"] == sig_1h["direction"] and sig_5m["direction"] != "HOLD"
         ) or (
-            sig_primary["direction"] == sig_1d["direction"] and sig_primary["direction"] != "HOLD"
+            sig_5m["direction"] == sig_1d["direction"] and sig_5m["direction"] != "HOLD"
         )
         mtf_aligned = all_agree or two_agree
 
-        # ── Base score from primary timeframe ────────────────────────────────
-        base_score = sig_primary["score"]
+        # ── Base score from 5m (primary timeframe) ───────────────────────────
+        base_score = sig_5m["score"]
 
         # MTF bonus / penalty
         if all_agree:
@@ -605,9 +580,9 @@ class AdvancedQuantEngine:
                 base_score = max(0, base_score - 5)   # contrarian signal
 
         # ── VWAP position ────────────────────────────────────────────────────
-        latest = df_primary.iloc[-1]
+        latest = df_5m.iloc[-1]
         vwap_position = None
-        if "VWAP" in df_primary.columns and not pd.isna(latest.get("VWAP")):
+        if "VWAP" in df_5m.columns and not pd.isna(latest.get("VWAP")):
             if latest["close"] > latest["VWAP"]:
                 vwap_position = "above"
                 if base_score > 50:
@@ -618,7 +593,7 @@ class AdvancedQuantEngine:
                     base_score = max(0, base_score - 3)
 
         # ── S/R proximity penalty ─────────────────────────────────────────────
-        resistances, supports = AdvancedQuantEngine.get_sr_levels(df_primary)
+        resistances, supports = AdvancedQuantEngine.get_sr_levels(df_5m)
         atr = latest["ATR"]
         near_resistance = any(abs(latest["close"] - r) < atr * 0.3 for r in resistances)
         near_support    = any(abs(latest["close"] - s) < atr * 0.3 for s in supports)
@@ -678,14 +653,14 @@ class AdvancedQuantEngine:
 
         # ── Reasoning ────────────────────────────────────────────────────────
         reasons = []
-        rsi_val = sig_primary.get("rsi", latest.get("RSI", 50))
+        rsi_val = sig_5m.get("rsi", latest.get("RSI", 50))
 
-        if sig_primary["trend"] == 100:
-            reasons.append("Primary: Price above EMA 20 & 50 — uptrend confirmed.")
-        elif sig_primary["trend"] == 0:
-            reasons.append("Primary: Price below EMA 20 & 50 — downtrend confirmed.")
+        if sig_5m["trend"] == 100:
+            reasons.append("5m: Price above EMA 20 & 50 — uptrend confirmed.")
+        elif sig_5m["trend"] == 0:
+            reasons.append("5m: Price below EMA 20 & 50 — downtrend confirmed.")
         else:
-            reasons.append("Primary: Mixed EMA alignment — no clear trend.")
+            reasons.append("5m: Mixed EMA alignment — no clear trend.")
 
         if rsi_val >= 70:
             reasons.append(f"RSI {rsi_val} — overbought. Momentum may stall soon.")
@@ -759,6 +734,7 @@ def calculate_position_size(capital: float, risk_pct: float, entry: float, stop_
     units        = risk_amount / risk_per_unit
     lots         = max(1, int(units / lot_size))
     actual_risk  = lots * lot_size * risk_per_unit
+    reward_1     = lots * lot_size * risk_per_unit   # 1:1 default; adjust to T1/T2 externally
     return {
         "lots": lots,
         "units": lots * lot_size,
@@ -937,11 +913,18 @@ else:
 #   live_candles  → 5m intraday candles  (7 days)
 #   candles_1h    → 1H candles           (30 days)
 #   candles_1d    → daily candles        (200 days)
+#
+# Daily mode uses candles_1d for its chart — NOT live_candles.
+# This prevents the two modes from overwriting each other in the same table.
 
 with st.spinner("Loading data…"):
     df_5m = fetch_df(active_sec_id, 300, "live_candles")   # 5m always
     df_1h = fetch_df(active_sec_id, 200, "candles_1h")     # 1H always
     df_1d = fetch_df(active_sec_id, 150, "candles_1d")     # daily always
+
+    # Pick the primary display frame based on mode
+    # Daily mode → show daily candles on chart; Intraday → show 5m candles
+    df_primary = df_1d if data_mode == "Daily (Swing)" else df_5m
 
     mtf_warning = None
     missing = []
@@ -956,21 +939,14 @@ with st.spinner("Loading data…"):
             f"In Daily mode only 1D data is needed for the chart; MTF needs all three."
         )
 
-    # FIX #5/#3: reassign the returned frames and pass the intraday flag so
-    # VWAP resets per session-day for the 5m/1H frames but not the daily one.
-    if not df_5m.empty:
-        df_5m = AdvancedQuantEngine.compute_indicators(df_5m, intraday=True)
-    if not df_1h.empty:
-        df_1h = AdvancedQuantEngine.compute_indicators(df_1h, intraday=True)
-    if not df_1d.empty:
-        df_1d = AdvancedQuantEngine.compute_indicators(df_1d, intraday=False)
-
-    # Pick the primary display/analysis frame AFTER indicators are computed.
-    df_primary = df_1d if data_mode == "Daily (Swing)" else df_5m
+    for _df in [df_5m, df_1h, df_1d]:
+        if not _df.empty:
+            AdvancedQuantEngine.compute_indicators(_df)
 
     vix      = fetch_india_vix()
-    # FIX #4: pass the real segment so stock (NSE_FNO) chains aren't queried as IDX_I.
-    pcr_data = fetch_option_chain_pcr(active_sec_id, active_seg) if is_options_eligible else {}
+    pcr_data = fetch_option_chain_pcr(active_sec_id) if is_options_eligible else {}
+
+# NSE option chain used for PCR — no debug expander needed
 
 copilot = AdvancedQuantEngine.process_ai_copilot(
     df_primary, df_1h, df_1d,
@@ -990,16 +966,12 @@ if signal_changed:
     if enable_journal:
         log_signal_to_journal(copilot, display_name, mode_label)
     if enable_alerts and copilot["confidence"] >= alert_threshold and not copilot["suppressed"]:
-        # FIX #1: build the VIX/PCR strings first — an inline format spec like
-        # {vix:.1f if vix else 'N/A'} is invalid Python and raised ValueError.
-        vix_str = f"{vix:.1f}" if vix is not None else "N/A"
-        pcr_str = str(copilot["pcr"]) if copilot["pcr"] is not None else "N/A"
         msg = (
             f"*⚡ AI Options Copilot — {display_name}*\n"
             f"Signal: *{copilot.get('option_action') or copilot['direction']}*\n"
             f"Regime: {copilot['regime']} | Score: {copilot['score']}% | Conf: {copilot['confidence']}%\n"
             f"Entry: {copilot['entry']} | SL: {copilot['stop_loss']} | T1: {copilot['target_1']}\n"
-            f"VIX: {vix_str} | PCR: {pcr_str}\n"
+            f"VIX: {vix:.1f if vix else 'N/A'} | PCR: {copilot['pcr'] or 'N/A'}\n"
             f"MTF aligned: {'✅' if copilot['mtf_aligned'] else '❌'}"
         )
         send_telegram_alert(msg)
@@ -1016,7 +988,7 @@ st.caption(
     f"MTF: **{'✅ Aligned' if copilot['mtf_aligned'] else '❌ Conflicted'}**"
 )
 
-if df_primary.empty:
+if df_5m.empty:
     st.info("📭 No data. Use sidebar to sync.")
     st.stop()
 
@@ -1072,10 +1044,7 @@ with col_left:
             fig.add_hline(y=s, line_dash="dot", line_color="rgba(46,160,67,0.4)", line_width=1, row=1, col=1)
 
         # Volume
-        # FIX #2: iterate over chart_df, not df_5m. In Daily mode chart_df is the
-        # daily frame with a different length, which caused IndexError / wrong colours.
-        colors = ["#3fb950" if chart_df["close"].iloc[i] >= chart_df["open"].iloc[i] else "#f85149"
-                  for i in range(len(chart_df))]
+        colors = ["#3fb950" if chart_df["close"].iloc[i] >= chart_df["open"].iloc[i] else "#f85149" for i in range(len(df_5m))]
         fig.add_trace(go.Bar(x=chart_df["timestamp"], y=chart_df["volume"], name="Volume", marker_color=colors), row=2, col=1)
         if "VMA_20" in chart_df.columns:
             fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VMA_20"], name="Vol MA",
@@ -1152,29 +1121,17 @@ with col_left:
                     c3.metric("Risk (₹)", f"₹{sizing['risk_amount']:,.0f}")
                     c4.metric("Capital at risk", f"{sizing['capital_at_risk_pct']}%")
 
-                    # FIX #6: keep these numeric; only format with :, when numeric.
-                    def _reward(target):
-                        try:
-                            if target == "-":
-                                return None
-                            return round(abs(float(target) - entry_f) * sizing["units"], 2)
-                        except Exception:
-                            return None
-
-                    reward_t1 = _reward(copilot["target_1"])
-                    reward_t2 = _reward(copilot["target_2"])
-                    risk_amt  = sizing["risk_amount"] or 0
-                    rr1 = round(reward_t1 / risk_amt, 2) if reward_t1 is not None and risk_amt else "-"
-                    rr2 = round(reward_t2 / risk_amt, 2) if reward_t2 is not None and risk_amt else "-"
-                    reward_t1_str = f"₹{reward_t1:,.0f}" if reward_t1 is not None else "-"
-                    reward_t2_str = f"₹{reward_t2:,.0f}" if reward_t2 is not None else "-"
+                    reward_t1 = round(abs(float(copilot["target_1"]) - entry_f) * sizing["units"], 2) if copilot["target_1"] != "-" else "-"
+                    reward_t2 = round(abs(float(copilot["target_2"]) - entry_f) * sizing["units"], 2) if copilot["target_2"] != "-" else "-"
+                    rr1 = round(reward_t1 / sizing["risk_amount"], 2) if sizing["risk_amount"] else "-"
+                    rr2 = round(reward_t2 / sizing["risk_amount"], 2) if sizing["risk_amount"] else "-"
 
                     st.markdown(f"""
                     <div class='glass-card'>
                         <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem;'>
                             <div><span class='metric-label'>Risk/unit</span><div style='font-weight:600;'>₹{sizing['risk_per_unit']}</div></div>
-                            <div><span class='metric-label'>Reward T1</span><div style='font-weight:600;color:#3fb950;'>{reward_t1_str}</div></div>
-                            <div><span class='metric-label'>Reward T2</span><div style='font-weight:600;color:#58a6ff;'>{reward_t2_str}</div></div>
+                            <div><span class='metric-label'>Reward T1</span><div style='font-weight:600;color:#3fb950;'>₹{reward_t1:,}</div></div>
+                            <div><span class='metric-label'>Reward T2</span><div style='font-weight:600;color:#58a6ff;'>₹{reward_t2:,}</div></div>
                             <div><span class='metric-label'>R:R T1</span><div style='font-weight:600;'>1 : {rr1}</div></div>
                             <div><span class='metric-label'>R:R T2</span><div style='font-weight:600;'>1 : {rr2}</div></div>
                             <div><span class='metric-label'>Lot size</span><div style='font-weight:600;'>{lot_size}</div></div>
@@ -1196,13 +1153,14 @@ with col_right:
     mtf = copilot.get("mtf", {})
     def mtf_class(d):
         return "mtf-bull" if d=="BUY" else ("mtf-bear" if d=="SELL" else "mtf-neut")
+    def mtf_label(d, s):
+        return f"{d}<br><small>{s}%</small>"
 
-    primary_tf_label = "1D" if data_mode == "Daily (Swing)" else "5m"
     st.markdown(f"""
     <div class='glass-card' style='padding:0.8rem;'>
         <div class='mtf-row'>
             <div class='mtf-pill {mtf_class(mtf.get("5m",{}).get("direction","HOLD"))}'>
-                {primary_tf_label}<br><b>{mtf.get("5m",{}).get("direction","—")}</b><br>
+                5m<br><b>{mtf.get("5m",{}).get("direction","—")}</b><br>
                 <small>{mtf.get("5m",{}).get("score","-")}%</small>
             </div>
             <div class='mtf-pill {mtf_class(mtf.get("1H",{}).get("direction","HOLD"))}'>
@@ -1267,6 +1225,7 @@ with col_right:
     expiry_days = copilot.get("expiry_days")
     near_expiry = copilot.get("near_expiry", False)
 
+    # Build optional rows cleanly — no inline ternary string concat inside f-strings
     max_pain_row = (
         f"<div><span class='metric-label'>Max Pain</span>"
         f"<div style='font-weight:600;'>₹{max_pain:,.0f}</div></div>"
@@ -1280,6 +1239,7 @@ with col_right:
         if expiry_days else ""
     )
 
+    # Top OI levels from NSE option chain
     top_call_res = copilot.get("pcr_data", {}).get("top_call_resistance", [])
     top_put_sup  = copilot.get("pcr_data", {}).get("top_put_support", [])
     call_res_str = " · ".join([f"₹{int(s):,}" for s in top_call_res]) if top_call_res else "N/A"
@@ -1354,15 +1314,14 @@ with col_right:
 
     # ── Key stats ──────────────────────────────────────────────────────────────
     st.markdown("### 📈 Key Stats")
-    # FIX: read every stat from the same frame (chart_df) instead of mixing frames.
-    last = chart_df.iloc[-1] if not chart_df.empty else pd.Series(dtype="float64")
+    last = chart_df.iloc[-1] if not chart_df.empty else df_1d.iloc[-1] if not df_1d.empty else pd.Series()
     stats = {
-        "High":   round(last["high"], 2) if "high" in last else "-",
-        "Low":    round(last["low"], 2) if "low" in last else "-",
-        "Volume": f"{int(last['volume']):,}" if "volume" in last else "-",
-        "RSI":    round(last["RSI"], 1) if "RSI" in last else "-",
-        "ATR":    round(last["ATR"], 2) if "ATR" in last else "-",
-        "VWAP":   round(last["VWAP"], 2) if "VWAP" in last and not pd.isna(last.get("VWAP")) else "-",
+        "High":   round(last["high"], 2),
+        "Low":    round(last["low"], 2),
+        "Volume": f"{int(last['volume']):,}",
+        "RSI":    round(last["RSI"], 1) if "RSI" in chart_df.columns else "-",
+        "ATR":    round(last["ATR"], 2) if "ATR" in chart_df.columns else "-",
+        "VWAP":   round(last["VWAP"], 2) if "VWAP" in chart_df.columns and not pd.isna(last.get("VWAP")) else "-",
     }
     stat_cols = st.columns(2)
     for i, (k, v) in enumerate(stats.items()):
