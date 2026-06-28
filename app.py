@@ -79,6 +79,7 @@ st.markdown("""
 SUPABASE_URL       = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY       = st.secrets.get("SUPABASE_SERVICE_KEY", st.secrets.get("SUPABASE_KEY", ""))
 DHAN_ACCESS_TOKEN  = st.secrets.get("DHAN_ACCESS_TOKEN", "")
+DHAN_CLIENT_ID     = st.secrets.get("DHAN_CLIENT_ID", "")
 TELEGRAM_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = st.secrets.get("TELEGRAM_CHAT_ID", "")
 
@@ -88,6 +89,8 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 if not DHAN_ACCESS_TOKEN:
     st.error("🔐 Missing DHAN_ACCESS_TOKEN. Dhan tokens expire daily — regenerate at https://dhan.co")
     st.stop()
+if not DHAN_CLIENT_ID:
+    st.warning("⚠️ DHAN_CLIENT_ID not set — option chain / PCR will be unavailable. Find it at web.dhan.co → Profile → Client ID")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -118,8 +121,9 @@ def ensure_journal_table():
 # ==================== DHAN API ====================
 DHAN_HEADERS = lambda: {
     "access-token": DHAN_ACCESS_TOKEN,
+    "client-id":    DHAN_CLIENT_ID,
     "Content-Type": "application/json",
-    "Accept": "application/json",
+    "Accept":       "application/json",
 }
 
 def pull_historical_dhan(security_id, exchange_segment, instrument_type, days_back, interval=None):
@@ -197,70 +201,76 @@ def fetch_india_vix() -> float | None:
 @st.cache_data(ttl=180)
 def fetch_option_chain_pcr(security_id: str) -> dict:
     """
-    Fetch PCR and max pain from NSE's public option chain API.
-    NSE is free, no auth required, and is the authoritative source for
-    Indian index option chain data. Dhan's option chain endpoint requires
-    a separate paid/partner API access level — we use NSE instead.
+    Fetch PCR, max pain, and OI walls from Dhan option chain API v2.
 
-    Supported: NIFTY (security_id=13), BANKNIFTY (25), FINNIFTY (27).
+    Two-step flow per Dhan docs:
+      1. POST /v2/optionchain/expirylist  → get nearest expiry date string
+      2. POST /v2/optionchain             → get full chain for that expiry
+
+    Required headers: access-token + client-id (both mandatory per Dhan docs).
+    UnderlyingScrip must be int, Expiry must be a valid date string "YYYY-MM-DD".
+
+    Response structure: data.oc is a dict keyed by strike price strings,
+    each value has "ce" and "pe" sub-dicts with "oi", "last_price", greeks etc.
     """
-    # Map Dhan security IDs to NSE symbol names
-    NSE_SYMBOL_MAP = {
-        "13":  "NIFTY",
-        "25":  "BANKNIFTY",
-        "27":  "FINNIFTY",
-        "35":  "MIDCPNIFTY",
-    }
-    symbol = NSE_SYMBOL_MAP.get(str(security_id))
-    if not symbol:
-        return {}   # not a supported index
+    if not DHAN_CLIENT_ID:
+        return {}
 
-    url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept":          "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer":         "https://www.nseindia.com/option-chain",
+    expiry_url = "https://api.dhan.co/v2/optionchain/expirylist"
+    chain_url  = "https://api.dhan.co/v2/optionchain"
+
+    expiry_payload = {
+        "UnderlyingScrip": int(security_id),
+        "UnderlyingSeg":   "IDX_I",
     }
+
     try:
-        session = requests.Session()
-        # NSE requires a cookie from the homepage before accepting API calls
-        session.get("https://www.nseindia.com", headers=headers, timeout=12)
-        res = session.get(url, headers=headers, timeout=12)
-
-        if res.status_code != 200:
+        # Step 1: get expiry list and pick nearest
+        exp_res = requests.post(
+            expiry_url, json=expiry_payload,
+            headers=DHAN_HEADERS(), timeout=15
+        )
+        if exp_res.status_code != 200:
             return {}
 
-        data     = res.json()
-        records  = data.get("records", {})
-        exp_dates = records.get("expiryDates", [])
-        if not exp_dates:
+        exp_data   = exp_res.json()
+        expiry_list = exp_data.get("data", [])
+        if not expiry_list:
             return {}
 
-        # Use the nearest expiry (first in list — NSE returns sorted)
-        nearest  = exp_dates[0]
-        all_data = records.get("data", [])
+        # Dhan returns dates as "YYYY-MM-DD" strings, sorted nearest first
+        nearest_expiry = expiry_list[0]
 
-        # Filter to nearest expiry only
-        strikes_data = [
-            row for row in all_data
-            if row.get("expiryDate") == nearest
-        ]
-        if not strikes_data:
+        # Step 2: fetch full option chain for nearest expiry
+        chain_payload = {
+            "UnderlyingScrip": int(security_id),
+            "UnderlyingSeg":   "IDX_I",
+            "Expiry":          nearest_expiry,
+        }
+        chain_res = requests.post(
+            chain_url, json=chain_payload,
+            headers=DHAN_HEADERS(), timeout=15
+        )
+        if chain_res.status_code != 200:
+            return {}
+
+        data = chain_res.json()
+        if data.get("status") != "success":
+            return {}
+
+        # data["data"]["oc"] is {"25650.000000": {"ce": {...}, "pe": {...}}, ...}
+        oc = data.get("data", {}).get("oc", {})
+        if not oc:
             return {}
 
         total_call_oi = 0
         total_put_oi  = 0
         parsed_strikes = []
 
-        for row in strikes_data:
-            sp       = float(row.get("strikePrice", 0))
-            call_oi  = int((row.get("CE") or {}).get("openInterest", 0) or 0)
-            put_oi   = int((row.get("PE") or {}).get("openInterest", 0) or 0)
+        for strike_str, sides in oc.items():
+            sp       = float(strike_str)
+            call_oi  = int((sides.get("ce") or {}).get("oi", 0) or 0)
+            put_oi   = int((sides.get("pe") or {}).get("oi", 0) or 0)
             total_call_oi += call_oi
             total_put_oi  += put_oi
             parsed_strikes.append({"strike": sp, "call_oi": call_oi, "put_oi": put_oi})
@@ -270,7 +280,7 @@ def fetch_option_chain_pcr(security_id: str) -> dict:
 
         pcr = round(total_put_oi / total_call_oi, 2)
 
-        # Max pain: strike that causes maximum loss for option buyers in aggregate
+        # Max pain: strike causing maximum aggregate loss for option buyers
         max_pain_strike = None
         min_pain = float("inf")
         for row in parsed_strikes:
@@ -284,7 +294,7 @@ def fetch_option_chain_pcr(security_id: str) -> dict:
                 min_pain        = pain
                 max_pain_strike = sp
 
-        # Top OI strikes (useful context for key levels)
+        # Top 3 OI strikes — call walls = resistance, put walls = support
         top_call = sorted(parsed_strikes, key=lambda x: x["call_oi"], reverse=True)[:3]
         top_put  = sorted(parsed_strikes, key=lambda x: x["put_oi"],  reverse=True)[:3]
 
@@ -295,12 +305,12 @@ def fetch_option_chain_pcr(security_id: str) -> dict:
         )
 
         return {
-            "pcr":            pcr,
-            "max_pain":       max_pain_strike,
-            "total_call_oi":  total_call_oi,
-            "total_put_oi":   total_put_oi,
-            "interpretation": interpretation,
-            "expiry":         nearest,
+            "pcr":                 pcr,
+            "max_pain":            max_pain_strike,
+            "total_call_oi":       total_call_oi,
+            "total_put_oi":        total_put_oi,
+            "interpretation":      interpretation,
+            "expiry":              nearest_expiry,
             "top_call_resistance": [r["strike"] for r in top_call],
             "top_put_support":     [r["strike"] for r in top_put],
         }
