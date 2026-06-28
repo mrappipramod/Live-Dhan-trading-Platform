@@ -197,56 +197,110 @@ def fetch_india_vix() -> float | None:
 @st.cache_data(ttl=120)
 def fetch_option_chain_pcr(security_id: str) -> dict:
     """
-    Fetch PCR and max pain from Dhan option chain API.
-    Returns dict with pcr, max_pain, total_call_oi, total_put_oi, interpretation.
+    Fetch PCR and max pain from Dhan option chain API v2.
+    Dhan returns a nested structure: top-level keys are expiry dates,
+    each containing lists of CE/PE strike data.
+    Falls back gracefully and logs the raw response shape for debugging.
     """
     url = "https://api.dhan.co/v2/optionchain"
-    payload = {"UnderlyingScrip": int(security_id), "UnderlyingSeg": "IDX_I", "Expiry": ""}
+    # Correct Dhan v2 payload — security_id as string, no Expiry key needed for nearest expiry
+    payload = {
+        "UnderlyingScrip": str(security_id),
+        "UnderlyingSeg":   "IDX_I",
+    }
     try:
         res = requests.post(url, json=payload, headers=DHAN_HEADERS(), timeout=15)
         if res.status_code != 200:
             return {}
         data = res.json()
 
-        # Dhan option chain structure: data["data"] is a list of strikes
-        strikes = data.get("data", [])
+        # Dhan v2 structure varies — try multiple known response shapes
+        strikes = []
+
+        # Shape A: {"data": [...]}  — flat list of strike objects
+        if isinstance(data.get("data"), list):
+            strikes = data["data"]
+
+        # Shape B: {"data": {"expiryList": [...], "optionChain": {expiry: [strikes]}}}
+        elif isinstance(data.get("data"), dict):
+            option_chain = data["data"].get("optionChain", {})
+            if option_chain:
+                # Use nearest expiry (first key)
+                nearest_expiry = next(iter(option_chain))
+                strikes = option_chain[nearest_expiry]
+
+        # Shape C: top-level is the expiry dict directly
+        elif not data.get("data") and isinstance(data, dict):
+            for key, val in data.items():
+                if isinstance(val, list) and len(val) > 5:
+                    strikes = val
+                    break
+
         if not strikes:
             return {}
 
-        total_call_oi = sum(s.get("callOI", 0) or 0 for s in strikes)
-        total_put_oi  = sum(s.get("putOI",  0) or 0 for s in strikes)
+        # Dhan uses different key names across versions — handle both
+        def get_oi(strike, side):
+            # Try camelCase first, then lowercase, then abbreviated
+            for k in [f"{side}OI", f"{side.lower()}_oi", f"{side.lower()}Oi",
+                      "CE_OI" if side == "call" else "PE_OI",
+                      "oi"]:
+                if k in strike.get(side.upper(), strike):
+                    v = strike.get(side.upper(), strike).get(k, 0) if side.upper() in strike else strike.get(k, 0)
+                    return int(v or 0)
+            # Last resort: check nested CE/PE dicts
+            nested = strike.get("CE", strike.get("ce", {})) if side == "call" else strike.get("PE", strike.get("pe", {}))
+            return int(nested.get("openInterest", nested.get("oi", nested.get("OI", 0))) or 0)
+
+        total_call_oi = 0
+        total_put_oi  = 0
+        parsed_strikes = []
+
+        for s in strikes:
+            # Handle both flat and nested CE/PE structure
+            if "CE" in s or "ce" in s:
+                # Nested structure: {"strikePrice": X, "CE": {...}, "PE": {...}}
+                ce_data = s.get("CE", s.get("ce", {}))
+                pe_data = s.get("PE", s.get("pe", {}))
+                call_oi = int(ce_data.get("openInterest", ce_data.get("oi", ce_data.get("OI", 0))) or 0)
+                put_oi  = int(pe_data.get("openInterest", pe_data.get("oi", pe_data.get("OI", 0))) or 0)
+                sp      = float(s.get("strikePrice", s.get("strike_price", 0)))
+            else:
+                # Flat structure: {"strikePrice": X, "callOI": Y, "putOI": Z}
+                call_oi = int(s.get("callOI", s.get("call_oi", s.get("CALL_OI", 0))) or 0)
+                put_oi  = int(s.get("putOI",  s.get("put_oi",  s.get("PUT_OI",  0))) or 0)
+                sp      = float(s.get("strikePrice", s.get("strike_price", 0)))
+
+            total_call_oi += call_oi
+            total_put_oi  += put_oi
+            parsed_strikes.append({"strike": sp, "call_oi": call_oi, "put_oi": put_oi})
 
         if total_call_oi == 0:
             return {}
 
         pcr = round(total_put_oi / total_call_oi, 2)
 
-        # Max pain: strike where total option loss for buyers is highest
+        # Max pain: strike where total ITM loss for ALL option buyers is maximised
         max_pain_strike = None
         min_pain = float("inf")
-        for s in strikes:
-            strike = s.get("strikePrice", 0)
+        for row in parsed_strikes:
+            sp = row["strike"]
             pain = sum(
-                max(0, strike - s2.get("strikePrice", 0)) * (s2.get("callOI", 0) or 0)
-                + max(0, s2.get("strikePrice", 0) - strike) * (s2.get("putOI", 0) or 0)
-                for s2 in strikes
+                max(0, sp - r["strike"]) * r["call_oi"] +
+                max(0, r["strike"] - sp) * r["put_oi"]
+                for r in parsed_strikes
             )
             if pain < min_pain:
-                min_pain = pain
-                max_pain_strike = strike
+                min_pain       = pain
+                max_pain_strike = sp
 
-        if pcr > 1.3:
-            interpretation = "Bullish"
-        elif pcr < 0.7:
-            interpretation = "Bearish"
-        else:
-            interpretation = "Neutral"
+        interpretation = "Bullish" if pcr > 1.3 else ("Bearish" if pcr < 0.7 else "Neutral")
 
         return {
-            "pcr": pcr,
-            "max_pain": max_pain_strike,
-            "total_call_oi": total_call_oi,
-            "total_put_oi":  total_put_oi,
+            "pcr":            pcr,
+            "max_pain":       max_pain_strike,
+            "total_call_oi":  total_call_oi,
+            "total_put_oi":   total_put_oi,
             "interpretation": interpretation,
         }
     except Exception:
@@ -822,8 +876,9 @@ with st.spinner("Loading data…"):
     df_1d = fetch_df(active_sec_id, 150, "candles_1d")
 
     # Fallback: if higher-TF tables empty, derive from 5m
+    # Use lowercase aliases ('h', 'D') — 'H' is deprecated in pandas >= 2.2
     if df_1h.empty and not df_5m.empty:
-        df_1h = df_5m.set_index("timestamp").resample("1H").agg(
+        df_1h = df_5m.set_index("timestamp").resample("1h").agg(
             {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
         ).dropna().reset_index()
     if df_1d.empty and not df_5m.empty:
@@ -837,6 +892,22 @@ with st.spinner("Loading data…"):
 
     vix      = fetch_india_vix()
     pcr_data = fetch_option_chain_pcr(active_sec_id) if is_options_eligible else {}
+
+# PCR debug expander — visible only when PCR is N/A so you can diagnose Dhan response shape
+if is_options_eligible and not pcr_data:
+    with st.expander("⚠️ PCR / OI returned N/A — click to debug Dhan option chain response"):
+        st.caption("The option chain API returned an empty or unrecognised response. Raw shape below:")
+        try:
+            _dbg = requests.post(
+                "https://api.dhan.co/v2/optionchain",
+                json={"UnderlyingScrip": str(active_sec_id), "UnderlyingSeg": "IDX_I"},
+                headers=DHAN_HEADERS(), timeout=15
+            )
+            st.code(f"Status: {_dbg.status_code}")
+            raw = _dbg.json()
+            st.json({k: (v[:1] if isinstance(v, list) else (dict(list(v.items())[:3]) if isinstance(v, dict) else v)) for k, v in raw.items()})
+        except Exception as e:
+            st.error(f"Debug fetch failed: {e}")
 
 copilot = AdvancedQuantEngine.process_ai_copilot(
     df_5m, df_1h, df_1d,
@@ -1097,25 +1168,42 @@ with col_right:
         st.markdown("<div class='info-note'>ℹ️ Equity — use Index/FNO for options signals.</div>", unsafe_allow_html=True)
 
     # ── VIX & PCR ──────────────────────────────────────────────────────────────
-    vix_class = "vix-ok" if (vix or 0) < VIX_SAFE else ("vix-warn" if (vix or 0) < VIX_CAUTION else "vix-danger")
-    pcr_val   = copilot.get("pcr")
+    vix_class  = "vix-ok" if (vix or 0) < VIX_SAFE else ("vix-warn" if (vix or 0) < VIX_CAUTION else "vix-danger")
+    vix_label  = f"{vix:.1f}" if vix else "N/A"
+    vix_regime_label = "🔴 Danger" if vix and vix >= VIX_DANGER else ("🟡 Caution" if vix and vix >= VIX_CAUTION else "🟢 Normal")
+    pcr_val    = copilot.get("pcr")
     pcr_interp = copilot.get("pcr_data", {}).get("interpretation", "N/A")
-    pcr_class = "pcr-bull" if pcr_interp == "Bullish" else ("pcr-bear" if pcr_interp == "Bearish" else "pcr-neut")
-    max_pain  = copilot.get("pcr_data", {}).get("max_pain", "N/A")
+    pcr_class  = "pcr-bull" if pcr_interp == "Bullish" else ("pcr-bear" if pcr_interp == "Bearish" else "pcr-neut")
+    max_pain   = copilot.get("pcr_data", {}).get("max_pain")
+    expiry_days = copilot.get("expiry_days")
+    near_expiry = copilot.get("near_expiry", False)
+
+    # Build optional rows cleanly — no inline ternary string concat inside f-strings
+    max_pain_row = (
+        f"<div><span class='metric-label'>Max Pain</span>"
+        f"<div style='font-weight:600;'>₹{max_pain:,.0f}</div></div>"
+        if max_pain else ""
+    )
+    expiry_color = "color:#f85149;" if near_expiry else ""
+    expiry_row = (
+        f"<div><span class='metric-label'>Expiry in</span>"
+        f"<div style='font-weight:600;{expiry_color}'>{expiry_days}d</div></div>"
+        if expiry_days else ""
+    )
 
     st.markdown(f"""
     <div class="glass-card">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;">
             <div><span class="metric-label">India VIX</span>
-                 <div class="{vix_class}">{f"{vix:.1f}" if vix else "N/A"}</div></div>
+                 <div class="{vix_class}">{vix_label}</div></div>
             <div><span class="metric-label">VIX regime</span>
-                 <div class="{vix_class}">{"🔴 Danger" if vix and vix>=VIX_DANGER else ("🟡 Caution" if vix and vix>=VIX_CAUTION else "🟢 Normal")}</div></div>
+                 <div class="{vix_class}">{vix_regime_label}</div></div>
             <div><span class="metric-label">PCR</span>
                  <div class="{pcr_class}">{pcr_val or "N/A"}</div></div>
             <div><span class="metric-label">OI sentiment</span>
                  <div class="{pcr_class}">{pcr_interp}</div></div>
-            {"<div><span class='metric-label'>Max Pain</span><div style='font-weight:600;'>₹" + str(max_pain) + "</div></div>" if max_pain != "N/A" else ""}
-            {"<div><span class='metric-label'>Expiry in</span><div style='font-weight:600;" + ("color:#f85149;" if copilot.get('near_expiry') else "") + "'>" + (str(copilot['expiry_days'])+"d" if copilot.get('expiry_days') else "N/A") + "</div></div>" if copilot.get('expiry_days') else ""}
+            {max_pain_row}
+            {expiry_row}
         </div>
     </div>
     """, unsafe_allow_html=True)
