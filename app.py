@@ -10,7 +10,7 @@ from supabase import create_client, Client
 # ===================== PAGE CONFIG =====================
 st.set_page_config(
     layout="wide",
-    page_title="AI Trading Copilot",
+    page_title="AI Options Copilot",
     page_icon="⚡",
     initial_sidebar_state="expanded"
 )
@@ -51,6 +51,36 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 0.5px;
         color: #8b949e;
+    }
+    .badge-call {
+        background: rgba(46, 160, 67, 0.25);
+        color: #3fb950;
+        padding: 0.3rem 1.2rem;
+        border-radius: 30px;
+        font-weight: 700;
+        font-size: 1.3rem;
+        border: 1px solid rgba(46, 160, 67, 0.4);
+        display: inline-block;
+    }
+    .badge-put {
+        background: rgba(248, 81, 73, 0.25);
+        color: #f85149;
+        padding: 0.3rem 1.2rem;
+        border-radius: 30px;
+        font-weight: 700;
+        font-size: 1.3rem;
+        border: 1px solid rgba(248, 81, 73, 0.4);
+        display: inline-block;
+    }
+    .badge-neutral {
+        background: rgba(139, 148, 158, 0.2);
+        color: #8b949e;
+        padding: 0.3rem 1.2rem;
+        border-radius: 30px;
+        font-weight: 700;
+        font-size: 1.3rem;
+        border: 1px solid rgba(139, 148, 158, 0.3);
+        display: inline-block;
     }
     .badge-buy {
         background: rgba(46, 160, 67, 0.2);
@@ -108,6 +138,18 @@ st.markdown("""
         border: 1px solid rgba(255,255,255,0.06);
         padding: 0.5rem;
     }
+    .confidence-bar {
+        height: 8px;
+        border-radius: 4px;
+        background: #21262d;
+        margin-top: 6px;
+    }
+    .confidence-fill {
+        height: 8px;
+        border-radius: 4px;
+        background: linear-gradient(90deg, #3fb950, #58a6ff);
+        width: 0%;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -149,20 +191,29 @@ class AdvancedQuantEngine:
     @staticmethod
     def process_ai_copilot(df: pd.DataFrame) -> dict:
         if df.empty or 'RSI' not in df.columns:
-            return {"regime": "Awaiting Data", "score": 0, "direction": "HOLD", 
-                    "entry": "-", "stop_loss": "-", "target_1": "-", "target_2": "-",
-                    "reasons": ["Insufficient data."]}
+            return {
+                "regime": "Awaiting Data",
+                "score": 0,
+                "direction": "HOLD",
+                "option_action": "NEUTRAL",
+                "entry": "-",
+                "stop_loss": "-",
+                "target_1": "-",
+                "target_2": "-",
+                "reasons": ["Insufficient data."],
+                "confidence": 0
+            }
         
         latest = df.iloc[-1]
         
-        # 1. Trend Matrix (40% weight)
+        # 1. Trend (40%)
         trend_score = 50
         if latest['close'] > latest['EMA_20'] and latest['EMA_20'] > latest['EMA_50']:
             trend_score = 100
         elif latest['close'] < latest['EMA_20'] and latest['EMA_20'] < latest['EMA_50']:
             trend_score = 0
         
-        # 2. Momentum Matrix (40% weight)
+        # 2. Momentum (40%)
         momentum_score = 50
         if 50 < latest['RSI'] < 70:
             momentum_score = 90
@@ -173,28 +224,36 @@ class AdvancedQuantEngine:
         elif latest['RSI'] <= 30:
             momentum_score = 0
         
-        # 3. Volume Score (20% weight) - DIRECTIONAL CHECK
+        # 3. Volume (20%) – directional
         volume_score = 50
-        if latest['volume'] > latest['VMA_20'] * 1.3:  # Volume spike
-            if latest['close'] > latest['open']:       # Bullish candle
+        if latest['volume'] > latest['VMA_20'] * 1.3:
+            if latest['close'] > latest['open']:
                 volume_score = 100
-            else:                                      # Bearish candle
+            else:
                 volume_score = 0
         
-        # Final weighted score
         final_score = (trend_score * 0.40) + (momentum_score * 0.40) + (volume_score * 0.20)
         
-        # Regime & Direction
+        # Direction and Option Action
         if final_score >= 80:
             regime, direction = "Strong Bullish", "BUY"
+            option_action = "CALL"
         elif final_score >= 60:
             regime, direction = "Bullish", "BUY"
+            option_action = "CALL"
         elif final_score <= 25:
             regime, direction = "Strong Bearish", "SELL"
+            option_action = "PUT"
         elif final_score <= 40:
             regime, direction = "Bearish", "SELL"
+            option_action = "PUT"
         else:
             regime, direction = "Sideways", "HOLD"
+            option_action = "NEUTRAL"
+        
+        # Confidence (based on score distance from 50)
+        confidence = abs(final_score - 50) / 50 * 100
+        confidence = min(100, int(confidence))
         
         # Build reasoning
         reasons = []
@@ -216,17 +275,19 @@ class AdvancedQuantEngine:
         if not reasons:
             reasons.append("No clear directional bias – awaiting catalyst.")
         
-        # Calculate levels
+        # Levels
         atr = latest['ATR']
         return {
             "regime": regime,
             "score": int(final_score),
             "direction": direction,
+            "option_action": option_action,
             "entry": f"{round(latest['close'], 2)}",
             "stop_loss": f"{round(latest['close'] - (atr * 1.5), 2)}" if direction == "BUY" else f"{round(latest['close'] + (atr * 1.5), 2)}",
             "target_1": f"{round(latest['close'] + (atr * 1.5), 2)}" if direction == "BUY" else f"{round(latest['close'] - (atr * 1.5), 2)}",
             "target_2": f"{round(latest['close'] + (atr * 3.0), 2)}" if direction == "BUY" else f"{round(latest['close'] - (atr * 3.0), 2)}",
-            "reasons": reasons
+            "reasons": reasons,
+            "confidence": confidence
         }
 
 # ==================== DHAN API ====================
@@ -302,7 +363,6 @@ with st.sidebar:
     
     st.divider()
     
-    # --- MODE SELECTION ---
     data_mode = st.radio(
         "📊 Chart Mode",
         ["Daily (Swing)", "Intraday (Live)"],
@@ -316,7 +376,7 @@ with st.sidebar:
         interval = None
         auto_sync_minutes = 60
         mode_label = "Daily"
-    else:  # Intraday
+    else:
         days_back = 7
         cleanup_days = 7
         interval = "5"
@@ -349,7 +409,6 @@ def sync_data(symbol, seg, inst, name, days_back, interval, cleanup_days, show_s
             
             supabase.table("live_candles").upsert(payload_list, on_conflict="symbol,timestamp").execute()
             
-            # Cleanup old data
             cutoff = (pd.Timestamp.now() - pd.Timedelta(days=cleanup_days)).isoformat()
             supabase.table("live_candles") \
                 .delete() \
@@ -369,7 +428,7 @@ def sync_data(symbol, seg, inst, name, days_back, interval, cleanup_days, show_s
 if sync_clicked:
     sync_data(str(active_sec_id), active_seg, active_inst, display_name, days_back, interval, cleanup_days)
 
-# ==================== AUTO-SYNC ON PAGE LOAD ====================
+# ==================== AUTO-SYNC ====================
 def auto_sync_if_stale():
     latest_check = supabase.table("live_candles") \
         .select("timestamp") \
@@ -393,7 +452,7 @@ def auto_sync_if_stale():
 
 auto_sync_if_stale()
 
-# ==================== FETCH DATA FOR DASHBOARD ====================
+# ==================== FETCH DATA ====================
 response = supabase.table("live_candles") \
     .select("*") \
     .eq("symbol", str(active_sec_id)) \
@@ -403,14 +462,13 @@ response = supabase.table("live_candles") \
 raw_candles = response.data
 
 # ==================== MAIN DASHBOARD ====================
-st.markdown("<h1 style='margin-bottom: 0;'>⚡ Institutional AI Trading Copilot</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='margin-bottom: 0;'>⚡ AI Options Copilot</h1>", unsafe_allow_html=True)
 st.caption(f"Analyzing **{display_name}** · Mode: **{mode_label}** · Data from Dhan & Supabase")
 
 if not raw_candles:
     st.info("📭 No data yet. Use the sidebar to sync.")
     st.stop()
 
-# Process data
 df = pd.DataFrame(raw_candles).iloc[::-1].reset_index(drop=True)
 df['timestamp'] = pd.to_datetime(df['timestamp'])
 df = AdvancedQuantEngine.compute_indicators(df)
@@ -455,38 +513,53 @@ with col_left:
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
 with col_right:
-    st.markdown("### 🤖 AI Signal")
-    badge_class = f"badge-{copilot['direction'].lower()}"
+    # ---- Option Recommendation Card ----
+    st.markdown("### 🎯 Option Strategy")
+    option_action = copilot['option_action']
+    if option_action == "CALL":
+        badge_html = f"<span class='badge-call'>BUY CALL</span>"
+        color = "#3fb950"
+    elif option_action == "PUT":
+        badge_html = f"<span class='badge-put'>BUY PUT</span>"
+        color = "#f85149"
+    else:
+        badge_html = f"<span class='badge-neutral'>NO TRADE</span>"
+        color = "#8b949e"
+    
     st.markdown(f"""
-    <div class="glass-card">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span class="metric-label">Regime</span>
-            <span class="{badge_class}">{copilot['direction']}</span>
+    <div class="glass-card" style="text-align: center; padding: 2rem 1rem;">
+        <div style="font-size: 1rem; color: #8b949e; margin-bottom: 0.5rem;">RECOMMENDED ACTION</div>
+        <div style="margin: 0.5rem 0;">{badge_html}</div>
+        <div style="display: flex; justify-content: center; gap: 2rem; margin-top: 1rem;">
+            <div><span class="metric-label">Score</span><div style="font-size: 1.8rem; font-weight: 700;">{copilot['score']}%</div></div>
+            <div><span class="metric-label">Confidence</span><div style="font-size: 1.8rem; font-weight: 700;">{copilot['confidence']}%</div></div>
         </div>
-        <div style="font-size: 1.8rem; font-weight: 700; margin: 0.4rem 0;">{copilot['regime']}</div>
-        <div style="display: flex; gap: 1rem; margin-top: 0.8rem;">
-            <div><span class="metric-label">Score</span><div style="font-size: 2rem; font-weight: 700;">{copilot['score']}%</div></div>
-            <div><span class="metric-label">Entry</span><div style="font-size: 1.4rem; font-weight: 600;">{copilot['entry']}</div></div>
+        <div class="confidence-bar">
+            <div class="confidence-fill" style="width: {copilot['confidence']}%;"></div>
         </div>
+        <div style="margin-top: 0.8rem; font-size: 0.85rem; color: #8b949e;">Regime: {copilot['regime']}</div>
     </div>
     """, unsafe_allow_html=True)
 
+    # ---- Trade Levels ----
     st.markdown("### 📊 Trade Levels")
     st.markdown(f"""
     <div class="glass-card">
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+            <div><span class="metric-label">Entry</span><div style="font-weight: 600;">{copilot['entry']}</div></div>
             <div><span class="metric-label">Stop Loss</span><div style="font-weight: 600;">{copilot['stop_loss']}</div></div>
             <div><span class="metric-label">Target 1</span><div style="font-weight: 600; color: #3fb950;">{copilot['target_1']}</div></div>
             <div><span class="metric-label">Target 2</span><div style="font-weight: 600; color: #58a6ff;">{copilot['target_2']}</div></div>
-            <div><span class="metric-label">Current</span><div style="font-weight: 600;">{df['close'].iloc[-1]:.2f}</div></div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
+    # ---- Reasoning ----
     st.markdown("### 🧠 Reasoning")
     reason_html = "".join([f"<div class='reason-item'>• {r}</div>" for r in copilot['reasons']])
     st.markdown(f"<div class='glass-card'>{reason_html}</div>", unsafe_allow_html=True)
 
+    # ---- Quick Stats ----
     st.markdown("### 📈 Key Stats")
     last = df.iloc[-1]
     stats = {
