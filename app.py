@@ -19,7 +19,8 @@ st.markdown("""
 
 # --- SECRETS & CLOUD INITIALIZATION ---
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+# FIX: Prefer the SERVICE_ROLE key to bypass RLS, fallback to anon key if not set
+SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_KEY", st.secrets.get("SUPABASE_KEY", ""))
 DHAN_ACCESS_TOKEN = st.secrets.get("DHAN_ACCESS_TOKEN", "")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -208,15 +209,31 @@ if st.sidebar.button("🔄 Sync Market Data Vector"):
     with st.spinner(f"Pulling historical data for {display_name}..."):
         candles = pull_historical_dhan(active_sec_id, active_seg, active_inst)
         if candles:
-            for candle in candles:
-                payload = {
-                    "symbol": str(active_sec_id), # Store by ID in DB
-                    "timestamp": candle["timestamp"],
-                    "open": candle["open"], "high": candle["high"], 
-                    "low": candle["low"], "close": candle["close"], "volume": candle["volume"]
-                }
-                supabase.table("live_candles").upsert(payload, on_conflict="symbol,timestamp").execute()
-            st.sidebar.success("✅ Cloud parameters synced.")
+            try:
+                # --- FIX 1: Build a LIST of payloads instead of upserting one by one ---
+                # This is MUCH faster and properly handles the upsert contract.
+                payload_list = []
+                for candle in candles:
+                    payload_list.append({
+                        "symbol": str(active_sec_id),
+                        "timestamp": candle["timestamp"],
+                        "open": candle["open"],
+                        "high": candle["high"],
+                        "low": candle["low"],
+                        "close": candle["close"],
+                        "volume": candle["volume"]
+                    })
+                
+                # --- FIX 2: Pass the LIST and catch potential API errors ---
+                supabase.table("live_candles").upsert(payload_list, on_conflict="symbol,timestamp").execute()
+                st.sidebar.success(f"✅ Synced {len(payload_list)} candles to cloud.")
+            
+            except Exception as e:
+                # --- FIX 3: Display the actual Supabase error to the user ---
+                error_msg = e.args[0] if e.args else str(e)
+                st.sidebar.error(f"❌ Supabase Error: {error_msg}")
+                # If you want to see the full raw error in the logs:
+                # st.exception(e)
         else:
             st.sidebar.warning("Fetch failed. Ensure market is open or check API credentials.")
 
