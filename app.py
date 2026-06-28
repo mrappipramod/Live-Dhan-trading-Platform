@@ -198,7 +198,8 @@ def fetch_india_vix() -> float | None:
     return None
 
 
-@st.cache_data(ttl=180)
+# PCR cache keyed by security_id only — mode (intraday/daily) is irrelevant
+@st.cache_data(ttl=180, show_spinner=False)
 def fetch_option_chain_pcr(security_id: str) -> dict:
     """
     Fetch PCR, max pain, and OI walls from Dhan option chain API v2.
@@ -863,9 +864,21 @@ with st.sidebar:
     sync_clicked = st.button("🔄 Sync Now", use_container_width=True)
     if st.button("🔄 Sync All Timeframes", use_container_width=True):
         with st.spinner("Syncing 5m, 1H, 1D…"):
-            sync_data(str(active_sec_id), active_seg, active_inst, display_name, 7,  "5",  7,  table="live_candles")
-            sync_data(str(active_sec_id), active_seg, active_inst, display_name, 30, "60", 30, table="candles_1h")
-            sync_data(str(active_sec_id), active_seg, active_inst, display_name, 100, None,100,table="candles_1d")
+            # 5m — always 7 days intraday
+            ok5  = sync_data(str(active_sec_id), active_seg, active_inst, display_name,
+                             7, "5", 7, table="live_candles")
+            # 1H — always 30 days of 60-min candles regardless of current mode
+            ok1h = sync_data(str(active_sec_id), active_seg, active_inst, display_name,
+                             30, "60", 30, table="candles_1h")
+            # 1D — always 200 days of daily candles; needs 150+ for reliable EMA 50
+            ok1d = sync_data(str(active_sec_id), active_seg, active_inst, display_name,
+                             200, None, 200, table="candles_1d")
+            # Clear session sync stamp so auto-sync doesn't skip on next rerun
+            for key in list(st.session_state.keys()):
+                if key.startswith("last_sync_"):
+                    del st.session_state[key]
+            if ok5 and ok1h and ok1d:
+                st.success("✅ All 3 timeframes synced successfully")
 
     if is_options_eligible:
         st.caption("✅ Options signals enabled")
@@ -884,25 +897,45 @@ auto_sync_if_stale(active_sec_id, active_seg, active_inst, display_name,
 # ==================== LOAD DATA ====================
 with st.spinner("Loading data…"):
     df_5m = fetch_df(active_sec_id, 300, "live_candles")
+
+    # Always load 1H and 1D from their dedicated tables — never resample from 5m.
+    # Resampling 7d of 5m data into 1D gives only ~5 bars which breaks EMA_50
+    # and causes false MTF conflicts in Intraday mode.
     df_1h = fetch_df(active_sec_id, 200, "candles_1h")
     df_1d = fetch_df(active_sec_id, 150, "candles_1d")
 
-    # Fallback: if higher-TF tables empty, derive from 5m
-    # Use lowercase aliases ('h', 'D') — 'H' is deprecated in pandas >= 2.2
-    if df_1h.empty and not df_5m.empty:
-        df_1h = df_5m.set_index("timestamp").resample("1h").agg(
-            {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
-        ).dropna().reset_index()
-    if df_1d.empty and not df_5m.empty:
-        df_1d = df_5m.set_index("timestamp").resample("1D").agg(
-            {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
-        ).dropna().reset_index()
+    mtf_warning = None
+
+    if df_1h.empty or df_1d.empty:
+        # Tables not populated yet — tell user exactly what to do
+        missing = []
+        if df_1h.empty: missing.append("1H")
+        if df_1d.empty: missing.append("1D")
+        mtf_warning = (
+            f"⚠️ {' and '.join(missing)} candle data missing. "
+            f"Click **Sync All Timeframes** in the sidebar to populate MTF signals. "
+            f"Until then, MTF alignment is unavailable."
+        )
+        # Last-resort fallback: resample only if we have enough 5m bars
+        # 1H needs ≥50 candles × 12 (5m per hour) = 600 bars minimum
+        # 1D needs ≥60 candles × 288 (5m per day) = impractical — skip 1D fallback
+        if df_1h.empty and len(df_5m) >= 600:
+            df_1h = (
+                df_5m.set_index("timestamp")
+                .resample("1h")
+                .agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"})
+                .dropna()
+                .reset_index()
+            )
+            if len(df_1h) < 20:
+                df_1h = pd.DataFrame()  # too few bars — discard
 
     for _df in [df_5m, df_1h, df_1d]:
         if not _df.empty:
             AdvancedQuantEngine.compute_indicators(_df)
 
     vix      = fetch_india_vix()
+    # PCR is instrument-level (not mode-dependent) — always fetch for eligible segments
     pcr_data = fetch_option_chain_pcr(active_sec_id) if is_options_eligible else {}
 
 # NSE option chain used for PCR — no debug expander needed
@@ -936,6 +969,9 @@ if signal_changed:
         send_telegram_alert(msg)
 
 # ==================== DASHBOARD ====================
+if mtf_warning:
+    st.warning(mtf_warning)
+
 st.markdown("<h1 style='margin-bottom:0;'>⚡ AI Options Copilot <sup style='font-size:0.5em;color:#58a6ff'>v4</sup></h1>", unsafe_allow_html=True)
 st.caption(
     f"**{display_name}** · {mode_label} · "
