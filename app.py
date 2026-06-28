@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
+from datetime import datetime, timedelta
 from supabase import create_client, Client
 
 # ===================== PAGE CONFIG =====================
@@ -18,17 +18,14 @@ st.set_page_config(
 # ===================== CUSTOM CSS =====================
 st.markdown("""
 <style>
-    /* ---- Global ---- */
     .stApp {
         background: radial-gradient(ellipse at 20% 50%, #0d1117 0%, #080B0E 100%);
         color: #e6edf3;
     }
-    /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
 
-    /* ---- Glassmorphism cards ---- */
     .glass-card {
         background: rgba(22, 27, 34, 0.6);
         backdrop-filter: blur(12px);
@@ -86,11 +83,6 @@ st.markdown("""
     }
     .reason-item:last-child { border-bottom: none; }
 
-    /* Sidebar */
-    .css-1d391kg { background-color: #0d1117; }
-    .sidebar-content {
-        padding: 1rem 0.5rem;
-    }
     .stButton > button {
         background: linear-gradient(135deg, #238636, #2ea043);
         color: white;
@@ -105,15 +97,11 @@ st.markdown("""
         transform: scale(1.02);
         box-shadow: 0 0 20px rgba(46, 160, 67, 0.3);
     }
-    .stSelectbox, .stTextInput, .stRadio {
-        background: transparent;
-    }
     .stRadio > div {
         background: rgba(255,255,255,0.03);
         border-radius: 8px;
         padding: 0.5rem;
     }
-    /* Chart container */
     .chart-container {
         background: rgba(13, 17, 23, 0.7);
         border-radius: 16px;
@@ -209,17 +197,22 @@ class AdvancedQuantEngine:
         }
 
 # ==================== DHAN API ====================
-def pull_historical_dhan(security_id: str, exchange_segment: str, instrument_type: str):
+def pull_historical_dhan(security_id: str, exchange_segment: str, instrument_type: str, days_back: int, interval: str = None):
     url = "https://api.dhan.co/v2/charts/historical"
     headers = {"access-token": DHAN_ACCESS_TOKEN, "Content-Type": "application/json", "Accept": "application/json"}
+    
     payload = {
         "securityId": str(security_id),
         "exchangeSegment": exchange_segment,
         "instrument": instrument_type,
         "expiryCode": 0,
-        "fromDate": (pd.Timestamp.now() - pd.Timedelta(days=100)).strftime("%Y-%m-%d"),
+        "fromDate": (pd.Timestamp.now() - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d"),
         "toDate": pd.Timestamp.now().strftime("%Y-%m-%d")
     }
+    # Add interval only for intraday (Dhan defaults to daily if omitted)
+    if interval:
+        payload["interval"] = interval
+    
     try:
         res = requests.post(url, json=payload, headers=headers)
         if res.status_code == 200:
@@ -276,53 +269,127 @@ with st.sidebar:
         display_name = f"ID: {active_sec_id}"
     
     st.divider()
-    sync_clicked = st.button("🔄 Sync Market Data", use_container_width=True)
     
-    st.caption("Data from Dhan, stored in Supabase.")
+    # --- MODE SELECTION (Daily vs Intraday) ---
+    data_mode = st.radio(
+        "📊 Chart Mode",
+        ["Daily (Swing)", "Intraday (Live)"],
+        index=0,
+        help="Daily: 100 days, accurate EMA 50. Intraday: 5-min candles, 7 days, auto-sync every 5 min."
+    )
+    
+    # Configure parameters based on mode
+    if data_mode == "Daily (Swing)":
+        days_back = 100
+        cleanup_days = 100
+        interval = None          # Omit = daily candles
+        auto_sync_minutes = 60   # Sync every hour (market doesn't change much after close)
+        mode_label = "Daily"
+    else:  # Intraday
+        days_back = 7
+        cleanup_days = 7
+        interval = "5"           # 5-minute candles
+        auto_sync_minutes = 5
+        mode_label = "Intraday (5m)"
+    
+    st.caption(f"Mode: **{mode_label}** · Keeping last **{cleanup_days} days**")
+    st.divider()
+    
+    sync_clicked = st.button("🔄 Sync Now", use_container_width=True)
 
-# ==================== SYNC LOGIC ====================
+# ==================== SYNC FUNCTION (reusable) ====================
+def sync_data(symbol, seg, inst, name, days_back, interval, cleanup_days, show_status=True):
+    """Fetch from Dhan, upsert to Supabase, and clean old data."""
+    with st.spinner(f"Fetching {name} ({mode_label})..."):
+        candles = pull_historical_dhan(symbol, seg, inst, days_back, interval)
+        if not candles:
+            if show_status: st.warning("No data. Check token or market hours.")
+            return False
+        
+        try:
+            payload_list = [{
+                "symbol": str(symbol),
+                "timestamp": c["timestamp"],
+                "open": float(c["open"]),
+                "high": float(c["high"]),
+                "low": float(c["low"]),
+                "close": float(c["close"]),
+                "volume": int(c["volume"])
+            } for c in candles]
+            
+            # Upsert
+            supabase.table("live_candles").upsert(payload_list, on_conflict="symbol,timestamp").execute()
+            
+            # Cleanup old data
+            cutoff = (pd.Timestamp.now() - pd.Timedelta(days=cleanup_days)).isoformat()
+            supabase.table("live_candles") \
+                .delete() \
+                .eq("symbol", str(symbol)) \
+                .lt("timestamp", cutoff) \
+                .execute()
+            
+            if show_status:
+                st.success(f"✅ Synced {len(payload_list)} candles (cleaned > {cleanup_days} days)")
+            return True
+        except Exception as e:
+            err = e.args[0] if e.args else str(e)
+            if show_status: st.error(f"❌ Supabase error: {err}")
+            return False
+
+# ==================== MANUAL SYNC ====================
 if sync_clicked:
-    with st.spinner(f"Fetching {display_name}..."):
-        candles = pull_historical_dhan(active_sec_id, active_seg, active_inst)
-        if candles:
-            try:
-                payload_list = []
-                for c in candles:
-                    payload_list.append({
-                        "symbol": str(active_sec_id),
-                        "timestamp": c["timestamp"],
-                        "open": float(c["open"]),
-                        "high": float(c["high"]),
-                        "low": float(c["low"]),
-                        "close": float(c["close"]),
-                        "volume": int(c["volume"])
-                    })
-                supabase.table("live_candles").upsert(payload_list, on_conflict="symbol,timestamp").execute()
-                st.sidebar.success(f"✅ Synced {len(payload_list)} candles")
-            except Exception as e:
-                err = e.args[0] if e.args else str(e)
-                st.sidebar.error(f"❌ {err}")
-        else:
-            st.sidebar.warning("No data. Check token or market hours.")
+    sync_data(str(active_sec_id), active_seg, active_inst, display_name, days_back, interval, cleanup_days)
+
+# ==================== AUTO-SYNC ON PAGE LOAD ====================
+def auto_sync_if_stale():
+    """Check latest timestamp; if older than auto_sync_minutes, pull fresh data."""
+    latest_check = supabase.table("live_candles") \
+        .select("timestamp") \
+        .eq("symbol", str(active_sec_id)) \
+        .order("timestamp", desc=True) \
+        .limit(1) \
+        .execute()
+    
+    should_sync = False
+    if not latest_check.data:
+        should_sync = True
+    else:
+        latest_ts = pd.to_datetime(latest_check.data[0]['timestamp'])
+        age = datetime.now().astimezone() - latest_ts
+        if age > timedelta(minutes=auto_sync_minutes):
+            should_sync = True
+            st.info(f"⏰ Data is {age.seconds//60} min old. Auto-syncing...")
+    
+    if should_sync:
+        sync_data(str(active_sec_id), active_seg, active_inst, display_name, days_back, interval, cleanup_days, show_status=True)
+
+# Run auto-sync (will show status messages if it triggers)
+auto_sync_if_stale()
+
+# ==================== FETCH DATA FOR DASHBOARD ====================
+response = supabase.table("live_candles") \
+    .select("*") \
+    .eq("symbol", str(active_sec_id)) \
+    .order("timestamp", desc=True) \
+    .limit(300) \
+    .execute()
+raw_candles = response.data
 
 # ==================== MAIN DASHBOARD ====================
 st.markdown("<h1 style='margin-bottom: 0;'>⚡ Institutional AI Trading Copilot</h1>", unsafe_allow_html=True)
-st.caption(f"Analyzing **{display_name}** · Powered by Dhan & Supabase")
+st.caption(f"Analyzing **{display_name}** · Mode: **{mode_label}** · Data from Dhan & Supabase")
 
-# ---- Fetch data ----
-response = supabase.table("live_candles").select("*").eq("symbol", str(active_sec_id)).order("timestamp", desc=True).limit(300).execute()
-raw = response.data
-
-if not raw:
+if not raw_candles:
     st.info("📭 No data yet. Use the sidebar to sync.")
     st.stop()
 
-df = pd.DataFrame(raw).iloc[::-1].reset_index(drop=True)
+# Process data
+df = pd.DataFrame(raw_candles).iloc[::-1].reset_index(drop=True)
 df['timestamp'] = pd.to_datetime(df['timestamp'])
 df = AdvancedQuantEngine.compute_indicators(df)
 copilot = AdvancedQuantEngine.process_ai_copilot(df)
 
-# ---- Layout ----
+# ==================== LAYOUT ====================
 col_left, col_right = st.columns([3, 1.2], gap="large")
 
 with col_left:
@@ -341,11 +408,12 @@ with col_left:
         increasing_line_color='#3fb950',
         decreasing_line_color='#f85149'
     ), row=1, col=1)
-    # EMAs
+    
     if 'EMA_20' in df.columns:
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_20'], name='EMA 20', line=dict(color='#ffa657', width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_50'], name='EMA 50', line=dict(color='#58a6ff', width=1.5)), row=1, col=1)
-    # Volume bars
+    
+    # Volume bars colored by direction
     colors = ['#3fb950' if df['close'].iloc[i] >= df['open'].iloc[i] else '#f85149' for i in range(len(df))]
     fig.add_trace(go.Bar(x=df['timestamp'], y=df['volume'], name='Volume', marker_color=colors), row=2, col=1)
 
