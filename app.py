@@ -194,83 +194,73 @@ def fetch_india_vix() -> float | None:
     return None
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=180)
 def fetch_option_chain_pcr(security_id: str) -> dict:
     """
-    Fetch PCR and max pain from Dhan option chain API v2.
-    Dhan returns a nested structure: top-level keys are expiry dates,
-    each containing lists of CE/PE strike data.
-    Falls back gracefully and logs the raw response shape for debugging.
+    Fetch PCR and max pain from NSE's public option chain API.
+    NSE is free, no auth required, and is the authoritative source for
+    Indian index option chain data. Dhan's option chain endpoint requires
+    a separate paid/partner API access level — we use NSE instead.
+
+    Supported: NIFTY (security_id=13), BANKNIFTY (25), FINNIFTY (27).
     """
-    url = "https://api.dhan.co/v2/optionchain"
-    # Correct Dhan v2 payload — security_id as string, no Expiry key needed for nearest expiry
-    payload = {
-        "UnderlyingScrip": str(security_id),
-        "UnderlyingSeg":   "IDX_I",
+    # Map Dhan security IDs to NSE symbol names
+    NSE_SYMBOL_MAP = {
+        "13":  "NIFTY",
+        "25":  "BANKNIFTY",
+        "27":  "FINNIFTY",
+        "35":  "MIDCPNIFTY",
+    }
+    symbol = NSE_SYMBOL_MAP.get(str(security_id))
+    if not symbol:
+        return {}   # not a supported index
+
+    url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer":         "https://www.nseindia.com/option-chain",
     }
     try:
-        res = requests.post(url, json=payload, headers=DHAN_HEADERS(), timeout=15)
+        session = requests.Session()
+        # NSE requires a cookie from the homepage before accepting API calls
+        session.get("https://www.nseindia.com", headers=headers, timeout=12)
+        res = session.get(url, headers=headers, timeout=12)
+
         if res.status_code != 200:
             return {}
-        data = res.json()
 
-        # Dhan v2 structure varies — try multiple known response shapes
-        strikes = []
-
-        # Shape A: {"data": [...]}  — flat list of strike objects
-        if isinstance(data.get("data"), list):
-            strikes = data["data"]
-
-        # Shape B: {"data": {"expiryList": [...], "optionChain": {expiry: [strikes]}}}
-        elif isinstance(data.get("data"), dict):
-            option_chain = data["data"].get("optionChain", {})
-            if option_chain:
-                # Use nearest expiry (first key)
-                nearest_expiry = next(iter(option_chain))
-                strikes = option_chain[nearest_expiry]
-
-        # Shape C: top-level is the expiry dict directly
-        elif not data.get("data") and isinstance(data, dict):
-            for key, val in data.items():
-                if isinstance(val, list) and len(val) > 5:
-                    strikes = val
-                    break
-
-        if not strikes:
+        data     = res.json()
+        records  = data.get("records", {})
+        exp_dates = records.get("expiryDates", [])
+        if not exp_dates:
             return {}
 
-        # Dhan uses different key names across versions — handle both
-        def get_oi(strike, side):
-            # Try camelCase first, then lowercase, then abbreviated
-            for k in [f"{side}OI", f"{side.lower()}_oi", f"{side.lower()}Oi",
-                      "CE_OI" if side == "call" else "PE_OI",
-                      "oi"]:
-                if k in strike.get(side.upper(), strike):
-                    v = strike.get(side.upper(), strike).get(k, 0) if side.upper() in strike else strike.get(k, 0)
-                    return int(v or 0)
-            # Last resort: check nested CE/PE dicts
-            nested = strike.get("CE", strike.get("ce", {})) if side == "call" else strike.get("PE", strike.get("pe", {}))
-            return int(nested.get("openInterest", nested.get("oi", nested.get("OI", 0))) or 0)
+        # Use the nearest expiry (first in list — NSE returns sorted)
+        nearest  = exp_dates[0]
+        all_data = records.get("data", [])
+
+        # Filter to nearest expiry only
+        strikes_data = [
+            row for row in all_data
+            if row.get("expiryDate") == nearest
+        ]
+        if not strikes_data:
+            return {}
 
         total_call_oi = 0
         total_put_oi  = 0
         parsed_strikes = []
 
-        for s in strikes:
-            # Handle both flat and nested CE/PE structure
-            if "CE" in s or "ce" in s:
-                # Nested structure: {"strikePrice": X, "CE": {...}, "PE": {...}}
-                ce_data = s.get("CE", s.get("ce", {}))
-                pe_data = s.get("PE", s.get("pe", {}))
-                call_oi = int(ce_data.get("openInterest", ce_data.get("oi", ce_data.get("OI", 0))) or 0)
-                put_oi  = int(pe_data.get("openInterest", pe_data.get("oi", pe_data.get("OI", 0))) or 0)
-                sp      = float(s.get("strikePrice", s.get("strike_price", 0)))
-            else:
-                # Flat structure: {"strikePrice": X, "callOI": Y, "putOI": Z}
-                call_oi = int(s.get("callOI", s.get("call_oi", s.get("CALL_OI", 0))) or 0)
-                put_oi  = int(s.get("putOI",  s.get("put_oi",  s.get("PUT_OI",  0))) or 0)
-                sp      = float(s.get("strikePrice", s.get("strike_price", 0)))
-
+        for row in strikes_data:
+            sp       = float(row.get("strikePrice", 0))
+            call_oi  = int((row.get("CE") or {}).get("openInterest", 0) or 0)
+            put_oi   = int((row.get("PE") or {}).get("openInterest", 0) or 0)
             total_call_oi += call_oi
             total_put_oi  += put_oi
             parsed_strikes.append({"strike": sp, "call_oi": call_oi, "put_oi": put_oi})
@@ -280,21 +270,29 @@ def fetch_option_chain_pcr(security_id: str) -> dict:
 
         pcr = round(total_put_oi / total_call_oi, 2)
 
-        # Max pain: strike where total ITM loss for ALL option buyers is maximised
+        # Max pain: strike that causes maximum loss for option buyers in aggregate
         max_pain_strike = None
         min_pain = float("inf")
         for row in parsed_strikes:
-            sp = row["strike"]
+            sp   = row["strike"]
             pain = sum(
                 max(0, sp - r["strike"]) * r["call_oi"] +
                 max(0, r["strike"] - sp) * r["put_oi"]
                 for r in parsed_strikes
             )
             if pain < min_pain:
-                min_pain       = pain
+                min_pain        = pain
                 max_pain_strike = sp
 
-        interpretation = "Bullish" if pcr > 1.3 else ("Bearish" if pcr < 0.7 else "Neutral")
+        # Top OI strikes (useful context for key levels)
+        top_call = sorted(parsed_strikes, key=lambda x: x["call_oi"], reverse=True)[:3]
+        top_put  = sorted(parsed_strikes, key=lambda x: x["put_oi"],  reverse=True)[:3]
+
+        interpretation = (
+            "Bullish" if pcr > 1.3
+            else "Bearish" if pcr < 0.7
+            else "Neutral"
+        )
 
         return {
             "pcr":            pcr,
@@ -302,7 +300,11 @@ def fetch_option_chain_pcr(security_id: str) -> dict:
             "total_call_oi":  total_call_oi,
             "total_put_oi":   total_put_oi,
             "interpretation": interpretation,
+            "expiry":         nearest,
+            "top_call_resistance": [r["strike"] for r in top_call],
+            "top_put_support":     [r["strike"] for r in top_put],
         }
+
     except Exception:
         return {}
 
@@ -893,21 +895,7 @@ with st.spinner("Loading data…"):
     vix      = fetch_india_vix()
     pcr_data = fetch_option_chain_pcr(active_sec_id) if is_options_eligible else {}
 
-# PCR debug expander — visible only when PCR is N/A so you can diagnose Dhan response shape
-if is_options_eligible and not pcr_data:
-    with st.expander("⚠️ PCR / OI returned N/A — click to debug Dhan option chain response"):
-        st.caption("The option chain API returned an empty or unrecognised response. Raw shape below:")
-        try:
-            _dbg = requests.post(
-                "https://api.dhan.co/v2/optionchain",
-                json={"UnderlyingScrip": str(active_sec_id), "UnderlyingSeg": "IDX_I"},
-                headers=DHAN_HEADERS(), timeout=15
-            )
-            st.code(f"Status: {_dbg.status_code}")
-            raw = _dbg.json()
-            st.json({k: (v[:1] if isinstance(v, list) else (dict(list(v.items())[:3]) if isinstance(v, dict) else v)) for k, v in raw.items()})
-        except Exception as e:
-            st.error(f"Debug fetch failed: {e}")
+# NSE option chain used for PCR — no debug expander needed
 
 copilot = AdvancedQuantEngine.process_ai_copilot(
     df_5m, df_1h, df_1d,
@@ -1185,10 +1173,26 @@ with col_right:
         if max_pain else ""
     )
     expiry_color = "color:#f85149;" if near_expiry else ""
+    expiry_label = copilot.get("pcr_data", {}).get("expiry", "")
     expiry_row = (
-        f"<div><span class='metric-label'>Expiry in</span>"
-        f"<div style='font-weight:600;{expiry_color}'>{expiry_days}d</div></div>"
+        f"<div><span class='metric-label'>Expiry ({expiry_label})</span>"
+        f"<div style='font-weight:600;{expiry_color}'>{expiry_days}d away</div></div>"
         if expiry_days else ""
+    )
+
+    # Top OI levels from NSE option chain
+    top_call_res = copilot.get("pcr_data", {}).get("top_call_resistance", [])
+    top_put_sup  = copilot.get("pcr_data", {}).get("top_put_support", [])
+    call_res_str = " · ".join([f"₹{int(s):,}" for s in top_call_res]) if top_call_res else "N/A"
+    put_sup_str  = " · ".join([f"₹{int(s):,}" for s in top_put_sup])  if top_put_sup  else "N/A"
+    oi_levels_row = (
+        f"<div style='grid-column:span 2; margin-top:0.3rem; border-top:1px solid rgba(255,255,255,0.06); padding-top:0.4rem;'>"
+        f"<span class='metric-label'>Call OI walls (resistance)</span>"
+        f"<div style='font-size:0.8rem;color:#f85149;font-weight:600;'>{call_res_str}</div>"
+        f"<span class='metric-label' style='margin-top:0.3rem;display:block;'>Put OI walls (support)</span>"
+        f"<div style='font-size:0.8rem;color:#3fb950;font-weight:600;'>{put_sup_str}</div>"
+        f"</div>"
+        if top_call_res or top_put_sup else ""
     )
 
     st.markdown(f"""
@@ -1204,6 +1208,7 @@ with col_right:
                  <div class="{pcr_class}">{pcr_interp}</div></div>
             {max_pain_row}
             {expiry_row}
+            {oi_levels_row}
         </div>
     </div>
     """, unsafe_allow_html=True)
