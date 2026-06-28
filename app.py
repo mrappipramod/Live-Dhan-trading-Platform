@@ -40,12 +40,6 @@ st.markdown("""
         border-color: rgba(88, 166, 255, 0.3);
         transform: translateY(-2px);
     }
-    .metric-value {
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 2.8rem;
-        font-weight: 700;
-        letter-spacing: -0.5px;
-    }
     .metric-label {
         font-size: 0.85rem;
         text-transform: uppercase;
@@ -82,30 +76,6 @@ st.markdown("""
         border: 1px solid rgba(139, 148, 158, 0.3);
         display: inline-block;
     }
-    .badge-buy {
-        background: rgba(46, 160, 67, 0.2);
-        color: #3fb950;
-        padding: 0.2rem 0.8rem;
-        border-radius: 20px;
-        font-weight: 600;
-        border: 1px solid rgba(46, 160, 67, 0.3);
-    }
-    .badge-sell {
-        background: rgba(248, 81, 73, 0.2);
-        color: #f85149;
-        padding: 0.2rem 0.8rem;
-        border-radius: 20px;
-        font-weight: 600;
-        border: 1px solid rgba(248, 81, 73, 0.3);
-    }
-    .badge-hold {
-        background: rgba(139, 148, 158, 0.2);
-        color: #8b949e;
-        padding: 0.2rem 0.8rem;
-        border-radius: 20px;
-        font-weight: 600;
-        border: 1px solid rgba(139, 148, 158, 0.3);
-    }
     .reason-item {
         padding: 0.4rem 0;
         border-bottom: 1px solid rgba(255,255,255,0.04);
@@ -130,12 +100,6 @@ st.markdown("""
     .stRadio > div {
         background: rgba(255,255,255,0.03);
         border-radius: 8px;
-        padding: 0.5rem;
-    }
-    .chart-container {
-        background: rgba(13, 17, 23, 0.7);
-        border-radius: 16px;
-        border: 1px solid rgba(255,255,255,0.06);
         padding: 0.5rem;
     }
     .confidence-bar {
@@ -206,14 +170,14 @@ class AdvancedQuantEngine:
         
         latest = df.iloc[-1]
         
-        # 1. Trend (40%)
+        # Trend (40%)
         trend_score = 50
         if latest['close'] > latest['EMA_20'] and latest['EMA_20'] > latest['EMA_50']:
             trend_score = 100
         elif latest['close'] < latest['EMA_20'] and latest['EMA_20'] < latest['EMA_50']:
             trend_score = 0
         
-        # 2. Momentum (40%)
+        # Momentum (40%)
         momentum_score = 50
         if 50 < latest['RSI'] < 70:
             momentum_score = 90
@@ -224,7 +188,7 @@ class AdvancedQuantEngine:
         elif latest['RSI'] <= 30:
             momentum_score = 0
         
-        # 3. Volume (20%) – directional
+        # Volume (20%) – directional
         volume_score = 50
         if latest['volume'] > latest['VMA_20'] * 1.3:
             if latest['close'] > latest['open']:
@@ -234,7 +198,6 @@ class AdvancedQuantEngine:
         
         final_score = (trend_score * 0.40) + (momentum_score * 0.40) + (volume_score * 0.20)
         
-        # Direction and Option Action
         if final_score >= 80:
             regime, direction = "Strong Bullish", "BUY"
             option_action = "CALL"
@@ -251,11 +214,9 @@ class AdvancedQuantEngine:
             regime, direction = "Sideways", "HOLD"
             option_action = "NEUTRAL"
         
-        # Confidence (based on score distance from 50)
         confidence = abs(final_score - 50) / 50 * 100
         confidence = min(100, int(confidence))
         
-        # Build reasoning
         reasons = []
         if trend_score == 100:
             reasons.append("Price above EMAs – strong uptrend.")
@@ -275,7 +236,6 @@ class AdvancedQuantEngine:
         if not reasons:
             reasons.append("No clear directional bias – awaiting catalyst.")
         
-        # Levels
         atr = latest['ATR']
         return {
             "regime": regime,
@@ -428,31 +388,52 @@ def sync_data(symbol, seg, inst, name, days_back, interval, cleanup_days, show_s
 if sync_clicked:
     sync_data(str(active_sec_id), active_seg, active_inst, display_name, days_back, interval, cleanup_days)
 
-# ==================== AUTO-SYNC ====================
+# ==================== AUTO-SYNC WITH SESSION STATE ====================
 def auto_sync_if_stale():
-    latest_check = supabase.table("live_candles") \
-        .select("timestamp") \
-        .eq("symbol", str(active_sec_id)) \
-        .order("timestamp", desc=True) \
-        .limit(1) \
-        .execute()
+    # Create a unique key for this symbol + mode combination
+    sync_key = f"last_sync_{active_sec_id}_{data_mode}"
+    now = datetime.now()
+    last_sync = st.session_state.get(sync_key)
     
     should_sync = False
-    if not latest_check.data:
+    if last_sync is None:
         should_sync = True
     else:
-        latest_ts = pd.to_datetime(latest_check.data[0]['timestamp'])
-        age = datetime.now().astimezone() - latest_ts
-        if age > timedelta(minutes=auto_sync_minutes):
+        elapsed = (now - last_sync).total_seconds()
+        if elapsed > auto_sync_minutes * 60:
             should_sync = True
-            st.info(f"⏰ Data is {age.seconds//60} min old. Auto-syncing...")
     
     if should_sync:
-        sync_data(str(active_sec_id), active_seg, active_inst, display_name, days_back, interval, cleanup_days, show_status=True)
+        # Check if data actually exists and its latest timestamp
+        latest_check = supabase.table("live_candles") \
+            .select("timestamp") \
+            .eq("symbol", str(active_sec_id)) \
+            .order("timestamp", desc=True) \
+            .limit(1) \
+            .execute()
+        
+        # If no data or data is older than threshold, sync
+        if not latest_check.data:
+            st.info("No data found. Initial sync...")
+            success = sync_data(str(active_sec_id), active_seg, active_inst, display_name, days_back, interval, cleanup_days, show_status=True)
+            if success:
+                st.session_state[sync_key] = now
+        else:
+            latest_ts = pd.to_datetime(latest_check.data[0]['timestamp'])
+            age = now.astimezone() - latest_ts
+            if age > timedelta(minutes=auto_sync_minutes):
+                st.info(f"⏰ Data is {age.seconds//60} min old. Auto-syncing...")
+                success = sync_data(str(active_sec_id), active_seg, active_inst, display_name, days_back, interval, cleanup_days, show_status=True)
+                if success:
+                    st.session_state[sync_key] = now
+            else:
+                # Data is fresh, just update the timestamp so we don't check again too soon
+                st.session_state[sync_key] = now
 
+# Run auto-sync only if not already synced in this session or if time has passed
 auto_sync_if_stale()
 
-# ==================== FETCH DATA ====================
+# ==================== FETCH DATA FOR DASHBOARD ====================
 response = supabase.table("live_candles") \
     .select("*") \
     .eq("symbol", str(active_sec_id)) \
@@ -469,8 +450,13 @@ if not raw_candles:
     st.info("📭 No data yet. Use the sidebar to sync.")
     st.stop()
 
-df = pd.DataFrame(raw_candles).iloc[::-1].reset_index(drop=True)
+# ---- DATA DEDUPLICATION (Critical Fix) ----
+df = pd.DataFrame(raw_candles)
+# Remove duplicate timestamps (keep first) and sort
+df = df.drop_duplicates(subset='timestamp').sort_values('timestamp').reset_index(drop=True)
 df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+# Compute indicators
 df = AdvancedQuantEngine.compute_indicators(df)
 copilot = AdvancedQuantEngine.process_ai_copilot(df)
 
@@ -513,18 +499,14 @@ with col_left:
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
 with col_right:
-    # ---- Option Recommendation Card ----
-    st.markdown("### 🎯 Option Strategy")
+    # ---- Option Recommendation ----
     option_action = copilot['option_action']
     if option_action == "CALL":
         badge_html = f"<span class='badge-call'>BUY CALL</span>"
-        color = "#3fb950"
     elif option_action == "PUT":
         badge_html = f"<span class='badge-put'>BUY PUT</span>"
-        color = "#f85149"
     else:
         badge_html = f"<span class='badge-neutral'>NO TRADE</span>"
-        color = "#8b949e"
     
     st.markdown(f"""
     <div class="glass-card" style="text-align: center; padding: 2rem 1rem;">
