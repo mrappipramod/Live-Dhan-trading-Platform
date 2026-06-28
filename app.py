@@ -152,12 +152,17 @@ class AdvancedQuantEngine:
             return {"regime": "Awaiting Data", "score": 0, "direction": "HOLD", 
                     "entry": "-", "stop_loss": "-", "target_1": "-", "target_2": "-",
                     "reasons": ["Insufficient data."]}
+        
         latest = df.iloc[-1]
+        
+        # 1. Trend Matrix (40% weight)
         trend_score = 50
         if latest['close'] > latest['EMA_20'] and latest['EMA_20'] > latest['EMA_50']:
             trend_score = 100
         elif latest['close'] < latest['EMA_20'] and latest['EMA_20'] < latest['EMA_50']:
             trend_score = 0
+        
+        # 2. Momentum Matrix (40% weight)
         momentum_score = 50
         if 50 < latest['RSI'] < 70:
             momentum_score = 90
@@ -165,10 +170,21 @@ class AdvancedQuantEngine:
             momentum_score = 40
         elif 30 < latest['RSI'] <= 50:
             momentum_score = 20
+        elif latest['RSI'] <= 30:
+            momentum_score = 0
+        
+        # 3. Volume Score (20% weight) - DIRECTIONAL CHECK
         volume_score = 50
-        if latest['volume'] > latest['VMA_20'] * 1.3:
-            volume_score = 100
-        final_score = (trend_score * 0.30) + (momentum_score * 0.30) + (volume_score * 0.40)
+        if latest['volume'] > latest['VMA_20'] * 1.3:  # Volume spike
+            if latest['close'] > latest['open']:       # Bullish candle
+                volume_score = 100
+            else:                                      # Bearish candle
+                volume_score = 0
+        
+        # Final weighted score
+        final_score = (trend_score * 0.40) + (momentum_score * 0.40) + (volume_score * 0.20)
+        
+        # Regime & Direction
         if final_score >= 80:
             regime, direction = "Strong Bullish", "BUY"
         elif final_score >= 60:
@@ -179,11 +195,28 @@ class AdvancedQuantEngine:
             regime, direction = "Bearish", "SELL"
         else:
             regime, direction = "Sideways", "HOLD"
+        
+        # Build reasoning
         reasons = []
-        if trend_score == 100: reasons.append("Price above EMAs – strong uptrend.")
-        if latest['RSI'] > 60: reasons.append(f"RSI at {round(latest['RSI'],1)} – momentum expanding.")
-        if volume_score == 100: reasons.append("Volume surge above 20‑period average.")
-        if not reasons: reasons.append("No clear directional bias – awaiting catalyst.")
+        if trend_score == 100:
+            reasons.append("Price above EMAs – strong uptrend.")
+        elif trend_score == 0:
+            reasons.append("Price below EMAs – strong downtrend.")
+        
+        if latest['RSI'] > 60:
+            reasons.append(f"RSI at {round(latest['RSI'],1)} – momentum expanding.")
+        elif latest['RSI'] < 40:
+            reasons.append(f"RSI at {round(latest['RSI'],1)} – momentum weakening.")
+        
+        if volume_score == 100:
+            reasons.append("Bullish volume spike confirms buying pressure.")
+        elif volume_score == 0 and latest['volume'] > latest['VMA_20'] * 1.3:
+            reasons.append("⚠️ High volume on a down candle – selling pressure detected.")
+        
+        if not reasons:
+            reasons.append("No clear directional bias – awaiting catalyst.")
+        
+        # Calculate levels
         atr = latest['ATR']
         return {
             "regime": regime,
@@ -209,7 +242,6 @@ def pull_historical_dhan(security_id: str, exchange_segment: str, instrument_typ
         "fromDate": (pd.Timestamp.now() - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d"),
         "toDate": pd.Timestamp.now().strftime("%Y-%m-%d")
     }
-    # Add interval only for intraday (Dhan defaults to daily if omitted)
     if interval:
         payload["interval"] = interval
     
@@ -270,7 +302,7 @@ with st.sidebar:
     
     st.divider()
     
-    # --- MODE SELECTION (Daily vs Intraday) ---
+    # --- MODE SELECTION ---
     data_mode = st.radio(
         "📊 Chart Mode",
         ["Daily (Swing)", "Intraday (Live)"],
@@ -278,17 +310,16 @@ with st.sidebar:
         help="Daily: 100 days, accurate EMA 50. Intraday: 5-min candles, 7 days, auto-sync every 5 min."
     )
     
-    # Configure parameters based on mode
     if data_mode == "Daily (Swing)":
         days_back = 100
         cleanup_days = 100
-        interval = None          # Omit = daily candles
-        auto_sync_minutes = 60   # Sync every hour (market doesn't change much after close)
+        interval = None
+        auto_sync_minutes = 60
         mode_label = "Daily"
     else:  # Intraday
         days_back = 7
         cleanup_days = 7
-        interval = "5"           # 5-minute candles
+        interval = "5"
         auto_sync_minutes = 5
         mode_label = "Intraday (5m)"
     
@@ -297,9 +328,8 @@ with st.sidebar:
     
     sync_clicked = st.button("🔄 Sync Now", use_container_width=True)
 
-# ==================== SYNC FUNCTION (reusable) ====================
+# ==================== SYNC FUNCTION ====================
 def sync_data(symbol, seg, inst, name, days_back, interval, cleanup_days, show_status=True):
-    """Fetch from Dhan, upsert to Supabase, and clean old data."""
     with st.spinner(f"Fetching {name} ({mode_label})..."):
         candles = pull_historical_dhan(symbol, seg, inst, days_back, interval)
         if not candles:
@@ -317,7 +347,6 @@ def sync_data(symbol, seg, inst, name, days_back, interval, cleanup_days, show_s
                 "volume": int(c["volume"])
             } for c in candles]
             
-            # Upsert
             supabase.table("live_candles").upsert(payload_list, on_conflict="symbol,timestamp").execute()
             
             # Cleanup old data
@@ -342,7 +371,6 @@ if sync_clicked:
 
 # ==================== AUTO-SYNC ON PAGE LOAD ====================
 def auto_sync_if_stale():
-    """Check latest timestamp; if older than auto_sync_minutes, pull fresh data."""
     latest_check = supabase.table("live_candles") \
         .select("timestamp") \
         .eq("symbol", str(active_sec_id)) \
@@ -363,7 +391,6 @@ def auto_sync_if_stale():
     if should_sync:
         sync_data(str(active_sec_id), active_seg, active_inst, display_name, days_back, interval, cleanup_days, show_status=True)
 
-# Run auto-sync (will show status messages if it triggers)
 auto_sync_if_stale()
 
 # ==================== FETCH DATA FOR DASHBOARD ====================
@@ -393,7 +420,6 @@ copilot = AdvancedQuantEngine.process_ai_copilot(df)
 col_left, col_right = st.columns([3, 1.2], gap="large")
 
 with col_left:
-    # Candlestick + Volume subplot
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
@@ -413,7 +439,6 @@ with col_left:
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_20'], name='EMA 20', line=dict(color='#ffa657', width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_50'], name='EMA 50', line=dict(color='#58a6ff', width=1.5)), row=1, col=1)
     
-    # Volume bars colored by direction
     colors = ['#3fb950' if df['close'].iloc[i] >= df['open'].iloc[i] else '#f85149' for i in range(len(df))]
     fig.add_trace(go.Bar(x=df['timestamp'], y=df['volume'], name='Volume', marker_color=colors), row=2, col=1)
 
@@ -430,7 +455,6 @@ with col_left:
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
 with col_right:
-    # ---- AI Copilot Card ----
     st.markdown("### 🤖 AI Signal")
     badge_class = f"badge-{copilot['direction'].lower()}"
     st.markdown(f"""
@@ -447,7 +471,6 @@ with col_right:
     </div>
     """, unsafe_allow_html=True)
 
-    # ---- Trade Levels ----
     st.markdown("### 📊 Trade Levels")
     st.markdown(f"""
     <div class="glass-card">
@@ -460,12 +483,10 @@ with col_right:
     </div>
     """, unsafe_allow_html=True)
 
-    # ---- Reasons ----
     st.markdown("### 🧠 Reasoning")
     reason_html = "".join([f"<div class='reason-item'>• {r}</div>" for r in copilot['reasons']])
     st.markdown(f"<div class='glass-card'>{reason_html}</div>", unsafe_allow_html=True)
 
-    # ---- Quick Stats ----
     st.markdown("### 📈 Key Stats")
     last = df.iloc[-1]
     stats = {
