@@ -41,22 +41,22 @@ st.set_page_config(
 # ===================== CSS =====================
 st.markdown("""
 <style>
-    .stApp { background: radial-gradient(ellipse at 20% 50%, #0d1117 0%, #080B0E 100%); color: #e6edf3; }
+    .stApp { background: radial-gradient(ellipse at 20% 50%, #161c25 0%, #0e131a 100%); color: #f0f6fc; }
     #MainMenu, footer, header { visibility: hidden; }
     .glass-card {
-        background: rgba(22,27,34,0.6); backdrop-filter: blur(12px);
-        border: 1px solid rgba(255,255,255,0.08); border-radius: 16px;
+        background: rgba(33,41,52,0.92); backdrop-filter: blur(12px);
+        border: 1px solid rgba(255,255,255,0.14); border-radius: 16px;
         padding: 1.2rem; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
         transition: transform 0.2s ease, border-color 0.2s; margin-bottom: 0.6rem;
     }
     .glass-card:hover { border-color: rgba(88,166,255,0.3); transform: translateY(-2px); }
-    .metric-label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; }
+    .metric-label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px; color: #c2cbd6; }
     .badge-call   { background:rgba(46,160,67,0.25);  color:#3fb950; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(46,160,67,0.4);   display:inline-block; }
     .badge-put    { background:rgba(248,81,73,0.25);  color:#f85149; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(248,81,73,0.4);  display:inline-block; }
-    .badge-neutral{ background:rgba(139,148,158,0.2); color:#8b949e; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
+    .badge-neutral{ background:rgba(139,148,158,0.2); color:#c2cbd6; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
     .badge-buy    { background:rgba(46,160,67,0.2);   color:#3fb950; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(46,160,67,0.3);   display:inline-block; }
     .badge-sell   { background:rgba(248,81,73,0.2);   color:#f85149; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(248,81,73,0.4);  display:inline-block; }
-    .badge-hold   { background:rgba(139,148,158,0.2); color:#8b949e; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
+    .badge-hold   { background:rgba(139,148,158,0.2); color:#c2cbd6; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
     .reason-item  { padding:0.35rem 0; border-bottom:1px solid rgba(255,255,255,0.04); font-size:0.85rem; }
     .reason-item:last-child { border-bottom: none; }
     .stButton > button { background:linear-gradient(135deg,#238636,#2ea043); color:white; border:none; border-radius:8px; font-weight:600; padding:0.5rem 1rem; transition:all 0.2s; width:100%; }
@@ -70,7 +70,7 @@ st.markdown("""
     .mtf-pill   { flex:1; text-align:center; padding:0.4rem 0.2rem; border-radius:8px; font-size:0.75rem; font-weight:600; }
     .mtf-bull   { background:rgba(46,160,67,0.15);  color:#3fb950; border:1px solid rgba(46,160,67,0.3); }
     .mtf-bear   { background:rgba(248,81,73,0.15);  color:#f85149; border:1px solid rgba(248,81,73,0.3); }
-    .mtf-neut   { background:rgba(139,148,158,0.15);color:#8b949e; border:1px solid rgba(139,148,158,0.3); }
+    .mtf-neut   { background:rgba(139,148,158,0.15);color:#c2cbd6; border:1px solid rgba(139,148,158,0.3); }
     .vix-ok     { color:#3fb950; font-weight:600; }
     .vix-warn   { color:#ffa657; font-weight:600; }
     .vix-danger { color:#f85149; font-weight:600; }
@@ -79,7 +79,18 @@ st.markdown("""
     .sr-sup     { background:rgba(46,160,67,0.15);  color:#3fb950; }
     .pcr-bull   { color:#3fb950; font-weight:700; }
     .pcr-bear   { color:#f85149; font-weight:700; }
-    .pcr-neut   { color:#8b949e; font-weight:700; }
+    .pcr-neut   { color:#c2cbd6; font-weight:700; }
+
+    /* ── Readability overrides for Streamlit's built-in widgets ── */
+    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p { color:#c2cbd6 !important; }
+    [data-testid="stMetricValue"] { color:#f0f6fc !important; font-weight:700; }
+    [data-testid="stMetricDelta"] { color:#c2cbd6 !important; }
+    [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color:#c2cbd6 !important; }
+    .stTabs [data-baseweb="tab"] { color:#c2cbd6; }
+    .stTabs [aria-selected="true"] { color:#f0f6fc; }
+    h1, h2, h3, h4, h5, h6 { color:#f0f6fc; }
+    .stRadio label, .stCheckbox label, .stSelectbox label, .stSlider label, .stNumberInput label,
+    .stTextInput label { color:#f0f6fc !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1094,7 +1105,7 @@ with col_left:
         fig.add_trace(go.Bar(x=chart_df["timestamp"], y=chart_df["volume"], name="Volume", marker_color=colors), row=2, col=1)
         if "VMA_20" in chart_df.columns:
             fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VMA_20"], name="Vol MA",
-                                     line=dict(color="#8b949e", width=1)), row=2, col=1)
+                                     line=dict(color="#c2cbd6", width=1)), row=2, col=1)
 
         # RSI
         if "RSI" in chart_df.columns:
@@ -1240,7 +1251,7 @@ with col_right:
 
     st.markdown(f"""
     <div class="glass-card" style="text-align:center;padding:1.5rem 1rem;">
-        <div style="font-size:0.78rem;color:#8b949e;margin-bottom:0.4rem;">
+        <div style="font-size:0.78rem;color:#c2cbd6;margin-bottom:0.4rem;">
             {"OPTION ACTION" if is_options_eligible else "DIRECTIONAL BIAS"}
         </div>
         <div style="margin:0.4rem 0;">{badge_html}</div>
@@ -1253,7 +1264,7 @@ with col_right:
         <div class="confidence-bar">
             <div class="confidence-fill" style="width:{copilot['confidence']}%;"></div>
         </div>
-        <div style="margin-top:0.6rem;font-size:0.78rem;color:#8b949e;">{copilot['regime']}</div>
+        <div style="margin-top:0.6rem;font-size:0.78rem;color:#c2cbd6;">{copilot['regime']}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1333,8 +1344,8 @@ with col_right:
             <div><span class="metric-label">Target 2</span>
                  <div style="font-weight:600;color:#58a6ff;">{copilot['target_2']}</div></div>
         </div>
-        <div style="margin-top:0.6rem;font-size:0.78rem;color:#8b949e;">
-            VWAP: <span style="color:{'#3fb950' if vwap_pos=='above' else '#f85149' if vwap_pos else '#8b949e'};">
+        <div style="margin-top:0.6rem;font-size:0.78rem;color:#c2cbd6;">
+            VWAP: <span style="color:{'#3fb950' if vwap_pos=='above' else '#f85149' if vwap_pos else '#c2cbd6'};">
             {"Above ↑" if vwap_pos=="above" else "Below ↓" if vwap_pos=="below" else "N/A"}</span>
         </div>
     </div>
