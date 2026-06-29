@@ -41,56 +41,60 @@ st.set_page_config(
 # ===================== CSS =====================
 st.markdown("""
 <style>
-    .stApp { background: radial-gradient(ellipse at 20% 50%, #161c25 0%, #0e131a 100%); color: #f0f6fc; }
+    .stApp { background: radial-gradient(ellipse at 20% 50%, #ffffff 0%, #f4f5f7 100%); color: #16191d; }
     #MainMenu, footer, header { visibility: hidden; }
     .glass-card {
-        background: rgba(33,41,52,0.92); backdrop-filter: blur(12px);
-        border: 1px solid rgba(255,255,255,0.14); border-radius: 16px;
-        padding: 1.2rem; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        background: #ffffff; backdrop-filter: blur(12px);
+        border: 1px solid rgba(0,0,0,0.08); border-radius: 16px;
+        padding: 1.2rem; box-shadow: 0 4px 18px rgba(0,0,0,0.08);
         transition: transform 0.2s ease, border-color 0.2s; margin-bottom: 0.6rem;
     }
-    .glass-card:hover { border-color: rgba(88,166,255,0.3); transform: translateY(-2px); }
-    .metric-label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px; color: #c2cbd6; }
-    .badge-call   { background:rgba(46,160,67,0.25);  color:#3fb950; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(46,160,67,0.4);   display:inline-block; }
-    .badge-put    { background:rgba(248,81,73,0.25);  color:#f85149; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(248,81,73,0.4);  display:inline-block; }
-    .badge-neutral{ background:rgba(139,148,158,0.2); color:#c2cbd6; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
-    .badge-buy    { background:rgba(46,160,67,0.2);   color:#3fb950; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(46,160,67,0.3);   display:inline-block; }
-    .badge-sell   { background:rgba(248,81,73,0.2);   color:#f85149; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(248,81,73,0.4);  display:inline-block; }
-    .badge-hold   { background:rgba(139,148,158,0.2); color:#c2cbd6; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
-    .reason-item  { padding:0.35rem 0; border-bottom:1px solid rgba(255,255,255,0.04); font-size:0.85rem; }
+    .glass-card:hover { border-color: rgba(234,88,12,0.45); transform: translateY(-2px); }
+    .metric-label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.5px; color: #5b6470; }
+    .badge-call   { background:rgba(46,160,67,0.25);  color:#16a34a; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(46,160,67,0.4);   display:inline-block; }
+    .badge-put    { background:rgba(248,81,73,0.25);  color:#dc2626; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(248,81,73,0.4);  display:inline-block; }
+    .badge-neutral{ background:rgba(139,148,158,0.2); color:#5b6470; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
+    .badge-buy    { background:rgba(46,160,67,0.2);   color:#16a34a; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(46,160,67,0.3);   display:inline-block; }
+    .badge-sell   { background:rgba(248,81,73,0.2);   color:#dc2626; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(248,81,73,0.4);  display:inline-block; }
+    .badge-hold   { background:rgba(139,148,158,0.2); color:#5b6470; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
+    .reason-item  { padding:0.35rem 0; border-bottom:1px solid rgba(0,0,0,0.08); font-size:0.85rem; color:#16191d; }
     .reason-item:last-child { border-bottom: none; }
-    .stButton > button { background:linear-gradient(135deg,#238636,#2ea043); color:white; border:none; border-radius:8px; font-weight:600; padding:0.5rem 1rem; transition:all 0.2s; width:100%; }
-    .stButton > button:hover { transform:scale(1.02); box-shadow:0 0 20px rgba(46,160,67,0.3); }
-    .confidence-bar  { height:6px; border-radius:3px; background:#21262d; margin-top:5px; }
-    .confidence-fill { height:6px; border-radius:3px; background:linear-gradient(90deg,#3fb950,#58a6ff); }
-    .info-note  { background:rgba(88,166,255,0.08); border:1px solid rgba(88,166,255,0.2); border-radius:8px; padding:0.4rem 0.7rem; font-size:0.78rem; color:#58a6ff; margin-top:0.4rem; }
-    .warn-note  { background:rgba(248,81,73,0.08);  border:1px solid rgba(248,81,73,0.2);  border-radius:8px; padding:0.4rem 0.7rem; font-size:0.78rem; color:#f85149; margin-top:0.4rem; }
-    .ok-note    { background:rgba(46,160,67,0.08);  border:1px solid rgba(46,160,67,0.2);  border-radius:8px; padding:0.4rem 0.7rem; font-size:0.78rem; color:#3fb950; margin-top:0.4rem; }
+    .stButton > button { background:linear-gradient(135deg,#ea580c,#f97316); color:white; border:none; border-radius:8px; font-weight:600; padding:0.5rem 1rem; transition:all 0.2s; width:100%; }
+    .stButton > button:hover { transform:scale(1.02); box-shadow:0 0 20px rgba(234,88,12,0.35); }
+    .confidence-bar  { height:6px; border-radius:3px; background:#e5e7eb; margin-top:5px; }
+    .confidence-fill { height:6px; border-radius:3px; background:linear-gradient(90deg,#f97316,#ea580c); }
+    .info-note  { background:rgba(234,88,12,0.08); border:1px solid rgba(234,88,12,0.25); border-radius:8px; padding:0.4rem 0.7rem; font-size:0.78rem; color:#ea580c; margin-top:0.4rem; }
+    .warn-note  { background:rgba(248,81,73,0.08);  border:1px solid rgba(248,81,73,0.2);  border-radius:8px; padding:0.4rem 0.7rem; font-size:0.78rem; color:#dc2626; margin-top:0.4rem; }
+    .ok-note    { background:rgba(46,160,67,0.08);  border:1px solid rgba(46,160,67,0.2);  border-radius:8px; padding:0.4rem 0.7rem; font-size:0.78rem; color:#16a34a; margin-top:0.4rem; }
     .mtf-row    { display:flex; gap:0.4rem; margin-bottom:0.5rem; }
     .mtf-pill   { flex:1; text-align:center; padding:0.4rem 0.2rem; border-radius:8px; font-size:0.75rem; font-weight:600; }
-    .mtf-bull   { background:rgba(46,160,67,0.15);  color:#3fb950; border:1px solid rgba(46,160,67,0.3); }
-    .mtf-bear   { background:rgba(248,81,73,0.15);  color:#f85149; border:1px solid rgba(248,81,73,0.3); }
-    .mtf-neut   { background:rgba(139,148,158,0.15);color:#c2cbd6; border:1px solid rgba(139,148,158,0.3); }
-    .vix-ok     { color:#3fb950; font-weight:600; }
-    .vix-warn   { color:#ffa657; font-weight:600; }
-    .vix-danger { color:#f85149; font-weight:600; }
+    .mtf-bull   { background:rgba(46,160,67,0.15);  color:#16a34a; border:1px solid rgba(46,160,67,0.3); }
+    .mtf-bear   { background:rgba(248,81,73,0.15);  color:#dc2626; border:1px solid rgba(248,81,73,0.3); }
+    .mtf-neut   { background:rgba(139,148,158,0.15);color:#5b6470; border:1px solid rgba(139,148,158,0.3); }
+    .vix-ok     { color:#16a34a; font-weight:600; }
+    .vix-warn   { color:#d97706; font-weight:600; }
+    .vix-danger { color:#dc2626; font-weight:600; }
     .sr-tag     { display:inline-block; padding:0.1rem 0.5rem; border-radius:4px; font-size:0.75rem; font-weight:600; margin:0.15rem; }
-    .sr-res     { background:rgba(248,81,73,0.15);  color:#f85149; }
-    .sr-sup     { background:rgba(46,160,67,0.15);  color:#3fb950; }
-    .pcr-bull   { color:#3fb950; font-weight:700; }
-    .pcr-bear   { color:#f85149; font-weight:700; }
-    .pcr-neut   { color:#c2cbd6; font-weight:700; }
+    .sr-res     { background:rgba(248,81,73,0.15);  color:#dc2626; }
+    .sr-sup     { background:rgba(46,160,67,0.15);  color:#16a34a; }
+    .pcr-bull   { color:#16a34a; font-weight:700; }
+    .pcr-bear   { color:#dc2626; font-weight:700; }
+    .pcr-neut   { color:#5b6470; font-weight:700; }
 
     /* ── Readability overrides for Streamlit's built-in widgets ── */
-    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p { color:#c2cbd6 !important; }
-    [data-testid="stMetricValue"] { color:#f0f6fc !important; font-weight:700; }
-    [data-testid="stMetricDelta"] { color:#c2cbd6 !important; }
-    [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color:#c2cbd6 !important; }
-    .stTabs [data-baseweb="tab"] { color:#c2cbd6; }
-    .stTabs [aria-selected="true"] { color:#f0f6fc; }
-    h1, h2, h3, h4, h5, h6 { color:#f0f6fc; }
+    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p { color:#5b6470 !important; }
+    [data-testid="stMetricValue"] { color:#16191d !important; font-weight:700; }
+    [data-testid="stMetricDelta"] { color:#5b6470 !important; }
+    [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color:#5b6470 !important; }
+    .stTabs [data-baseweb="tab"] { color:#5b6470; }
+    .stTabs [aria-selected="true"] { color:#ea580c; }
+    .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { background-color:#ea580c; }
+    h1, h2, h3, h4, h5, h6 { color:#16191d; }
     .stRadio label, .stCheckbox label, .stSelectbox label, .stSlider label, .stNumberInput label,
-    .stTextInput label { color:#f0f6fc !important; }
+    .stTextInput label { color:#16191d !important; }
+    section[data-testid="stSidebar"] { background:#f4f5f7; border-right:1px solid rgba(0,0,0,0.06); }
+    section[data-testid="stSidebar"] * { color:#16191d; }
+    hr { border-color:rgba(0,0,0,0.08); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1036,7 +1040,7 @@ if signal_changed:
 if mtf_warning:
     st.warning(mtf_warning)
 
-st.markdown("<h1 style='margin-bottom:0;'>⚡ AI Options Copilot <sup style='font-size:0.5em;color:#58a6ff'>v4</sup></h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='margin-bottom:0;'>⚡ AI Options Copilot <sup style='font-size:0.5em;color:#ea580c'>v4</sup></h1>", unsafe_allow_html=True)
 st.caption(
     f"**{display_name}** · {mode_label} · "
     f"VIX: **{f'{vix:.1f}' if vix else 'N/A'}** · "
@@ -1074,11 +1078,11 @@ with col_left:
         fig.add_trace(go.Candlestick(
             x=chart_df["timestamp"],
             open=chart_df["open"], high=chart_df["high"], low=chart_df["low"], close=chart_df["close"],
-            name="Candles", increasing_line_color="#3fb950", decreasing_line_color="#f85149",
+            name="Candles", increasing_line_color="#16a34a", decreasing_line_color="#dc2626",
         ), row=1, col=1)
 
         # EMAs
-        for col_name, color, label in [("EMA_9","#d2a8ff","EMA 9"),("EMA_20","#ffa657","EMA 20"),("EMA_50","#58a6ff","EMA 50")]:
+        for col_name, color, label in [("EMA_9","#7c3aed","EMA 9"),("EMA_20","#d97706","EMA 20"),("EMA_50","#2563eb","EMA 50")]:
             if col_name in chart_df.columns:
                 fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df[col_name], name=label,
                                          line=dict(color=color, width=1.5)), row=1, col=1)
@@ -1086,7 +1090,7 @@ with col_left:
         # VWAP + bands
         if "VWAP" in chart_df.columns:
             fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VWAP"], name="VWAP",
-                                     line=dict(color="#e3b341", width=2, dash="dot")), row=1, col=1)
+                                     line=dict(color="#b45309", width=2, dash="dot")), row=1, col=1)
             fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VWAP_U1"], name="VWAP +1σ",
                                      line=dict(color="rgba(227,179,65,0.35)", width=1, dash="dash")), row=1, col=1)
             fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VWAP_L1"], name="VWAP -1σ",
@@ -1101,22 +1105,22 @@ with col_left:
 
         # Volume
         # PATCH 3 — iterate the frame actually being plotted (chart_df), not df_5m.
-        colors = ["#3fb950" if chart_df["close"].iloc[i] >= chart_df["open"].iloc[i] else "#f85149" for i in range(len(chart_df))]
+        colors = ["#16a34a" if chart_df["close"].iloc[i] >= chart_df["open"].iloc[i] else "#dc2626" for i in range(len(chart_df))]
         fig.add_trace(go.Bar(x=chart_df["timestamp"], y=chart_df["volume"], name="Volume", marker_color=colors), row=2, col=1)
         if "VMA_20" in chart_df.columns:
             fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VMA_20"], name="Vol MA",
-                                     line=dict(color="#c2cbd6", width=1)), row=2, col=1)
+                                     line=dict(color="#5b6470", width=1)), row=2, col=1)
 
         # RSI
         if "RSI" in chart_df.columns:
             fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["RSI"], name="RSI",
-                                     line=dict(color="#58a6ff", width=1.5)), row=3, col=1)
+                                     line=dict(color="#ea580c", width=1.5)), row=3, col=1)
             fig.add_hline(y=70, line_dash="dot", line_color="rgba(248,81,73,0.5)",  line_width=1, row=3, col=1)
             fig.add_hline(y=30, line_dash="dot", line_color="rgba(46,160,67,0.5)",  line_width=1, row=3, col=1)
             fig.add_hline(y=50, line_dash="dot", line_color="rgba(139,148,158,0.3)", line_width=1, row=3, col=1)
 
         fig.update_layout(
-            template="plotly_dark", height=620,
+            template="plotly_white", height=620,
             margin=dict(l=0, r=0, t=30, b=0),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -1187,8 +1191,8 @@ with col_left:
                     <div class='glass-card'>
                         <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem;'>
                             <div><span class='metric-label'>Risk/unit</span><div style='font-weight:600;'>₹{sizing['risk_per_unit']}</div></div>
-                            <div><span class='metric-label'>Reward T1</span><div style='font-weight:600;color:#3fb950;'>₹{reward_t1:,}</div></div>
-                            <div><span class='metric-label'>Reward T2</span><div style='font-weight:600;color:#58a6ff;'>₹{reward_t2:,}</div></div>
+                            <div><span class='metric-label'>Reward T1</span><div style='font-weight:600;color:#16a34a;'>₹{reward_t1:,}</div></div>
+                            <div><span class='metric-label'>Reward T2</span><div style='font-weight:600;color:#ea580c;'>₹{reward_t2:,}</div></div>
                             <div><span class='metric-label'>R:R T1</span><div style='font-weight:600;'>1 : {rr1}</div></div>
                             <div><span class='metric-label'>R:R T2</span><div style='font-weight:600;'>1 : {rr2}</div></div>
                             <div><span class='metric-label'>Lot size</span><div style='font-weight:600;'>{lot_size}</div></div>
@@ -1229,7 +1233,7 @@ with col_right:
                 <small>{mtf.get("1D",{}).get("score","-")}%</small>
             </div>
         </div>
-        <div style='font-size:0.78rem;color:{"#3fb950" if copilot["mtf_aligned"] else "#f85149"};text-align:center;'>
+        <div style='font-size:0.78rem;color:{"#16a34a" if copilot["mtf_aligned"] else "#dc2626"};text-align:center;'>
             {"✅ Timeframes aligned — higher conviction" if copilot["mtf_aligned"] else "❌ Timeframes conflicted — lower conviction"}
         </div>
     </div>
@@ -1251,7 +1255,7 @@ with col_right:
 
     st.markdown(f"""
     <div class="glass-card" style="text-align:center;padding:1.5rem 1rem;">
-        <div style="font-size:0.78rem;color:#c2cbd6;margin-bottom:0.4rem;">
+        <div style="font-size:0.78rem;color:#5b6470;margin-bottom:0.4rem;">
             {"OPTION ACTION" if is_options_eligible else "DIRECTIONAL BIAS"}
         </div>
         <div style="margin:0.4rem 0;">{badge_html}</div>
@@ -1264,7 +1268,7 @@ with col_right:
         <div class="confidence-bar">
             <div class="confidence-fill" style="width:{copilot['confidence']}%;"></div>
         </div>
-        <div style="margin-top:0.6rem;font-size:0.78rem;color:#c2cbd6;">{copilot['regime']}</div>
+        <div style="margin-top:0.6rem;font-size:0.78rem;color:#5b6470;">{copilot['regime']}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1288,7 +1292,7 @@ with col_right:
         f"<div style='font-weight:600;'>₹{max_pain:,.0f}</div></div>"
         if max_pain else ""
     )
-    expiry_color = "color:#f85149;" if near_expiry else ""
+    expiry_color = "color:#dc2626;" if near_expiry else ""
     expiry_label = copilot.get("pcr_data", {}).get("expiry", "")
     expiry_row = (
         f"<div><span class='metric-label'>Expiry ({expiry_label})</span>"
@@ -1304,9 +1308,9 @@ with col_right:
     oi_levels_row = (
         f"<div style='grid-column:span 2; margin-top:0.3rem; border-top:1px solid rgba(255,255,255,0.06); padding-top:0.4rem;'>"
         f"<span class='metric-label'>Call OI walls (resistance)</span>"
-        f"<div style='font-size:0.8rem;color:#f85149;font-weight:600;'>{call_res_str}</div>"
+        f"<div style='font-size:0.8rem;color:#dc2626;font-weight:600;'>{call_res_str}</div>"
         f"<span class='metric-label' style='margin-top:0.3rem;display:block;'>Put OI walls (support)</span>"
-        f"<div style='font-size:0.8rem;color:#3fb950;font-weight:600;'>{put_sup_str}</div>"
+        f"<div style='font-size:0.8rem;color:#16a34a;font-weight:600;'>{put_sup_str}</div>"
         f"</div>"
         if top_call_res or top_put_sup else ""
     )
@@ -1338,14 +1342,14 @@ with col_right:
             <div><span class="metric-label">Entry</span>
                  <div style="font-weight:600;">{copilot['entry']}</div></div>
             <div><span class="metric-label">Stop Loss</span>
-                 <div style="font-weight:600;color:#f85149;">{copilot['stop_loss']}</div></div>
+                 <div style="font-weight:600;color:#dc2626;">{copilot['stop_loss']}</div></div>
             <div><span class="metric-label">Target 1</span>
-                 <div style="font-weight:600;color:#3fb950;">{copilot['target_1']}</div></div>
+                 <div style="font-weight:600;color:#16a34a;">{copilot['target_1']}</div></div>
             <div><span class="metric-label">Target 2</span>
-                 <div style="font-weight:600;color:#58a6ff;">{copilot['target_2']}</div></div>
+                 <div style="font-weight:600;color:#ea580c;">{copilot['target_2']}</div></div>
         </div>
-        <div style="margin-top:0.6rem;font-size:0.78rem;color:#c2cbd6;">
-            VWAP: <span style="color:{'#3fb950' if vwap_pos=='above' else '#f85149' if vwap_pos else '#c2cbd6'};">
+        <div style="margin-top:0.6rem;font-size:0.78rem;color:#5b6470;">
+            VWAP: <span style="color:{'#16a34a' if vwap_pos=='above' else '#dc2626' if vwap_pos else '#5b6470'};">
             {"Above ↑" if vwap_pos=="above" else "Below ↓" if vwap_pos=="below" else "N/A"}</span>
         </div>
     </div>
