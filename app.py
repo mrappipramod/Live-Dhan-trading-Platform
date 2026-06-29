@@ -1,18 +1,26 @@
 """
-AI Options Copilot v4 — Institutional Grade
-============================================
-New in v4:
-  • India VIX filter          — suppress signals in high-volatility regimes
-  • Multi-timeframe (MTF)     — 5m + 1H + Daily confluence; trade only when aligned
-  • OI / PCR analysis         — Put-Call Ratio from Dhan option chain (Index only)
-  • VWAP + ±1σ/2σ bands       — institutional intraday level
-  • Support & Resistance       — swing high/low detection, entry proximity check
-  • Expiry calendar awareness  — flag/suppress signals near weekly expiry
-  • Signal journal             — every signal logged to Supabase with outcome tracking
-  • Telegram alerts            — push when high-confidence signal fires
-  • Position sizing engine     — Kelly / fixed-fractional lot calculator
+AI Options Copilot v4 — Institutional Grade  (PATCHED)
+======================================================
+Patches applied to this build (search for "PATCH" to find each one):
+  1. pull_historical_dhan  — route intraday (1/5/15/25/60m) to
+     /v2/charts/intraday and daily to /v2/charts/historical. The old code
+     sent everything to /charts/historical (daily-only) and just appended
+     `interval`, which that endpoint ignores → "5m" sync silently returned
+     DAILY candles → df_5m < 5 rows → no RSI column → "Awaiting Data".
+  2. Telegram alert f-string — `{vix:.1f if vix else 'N/A'}` is an illegal
+     format spec and crashes when an alert fires. VIX is now pre-formatted.
+  3. Volume bar colors — iterated range(len(df_5m)) while indexing chart_df;
+     now iterates range(len(chart_df)).
+  4. Option-chain PCR — small throttle added between expirylist and
+     optionchain calls (Dhan throttles this endpoint).
+
+Original feature set:
+  • India VIX filter • Multi-timeframe confluence • OI / PCR • VWAP ±σ bands
+  • Support/Resistance • Expiry awareness • Signal journal • Telegram alerts
+  • Position sizing engine
 """
 
+import time
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -47,7 +55,7 @@ st.markdown("""
     .badge-put    { background:rgba(248,81,73,0.25);  color:#f85149; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(248,81,73,0.4);  display:inline-block; }
     .badge-neutral{ background:rgba(139,148,158,0.2); color:#8b949e; padding:0.3rem 1rem; border-radius:30px; font-weight:700; font-size:1.2rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
     .badge-buy    { background:rgba(46,160,67,0.2);   color:#3fb950; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(46,160,67,0.3);   display:inline-block; }
-    .badge-sell   { background:rgba(248,81,73,0.2);   color:#f85149; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(248,81,73,0.3);  display:inline-block; }
+    .badge-sell   { background:rgba(248,81,73,0.2);   color:#f85149; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(248,81,73,0.4);  display:inline-block; }
     .badge-hold   { background:rgba(139,148,158,0.2); color:#8b949e; padding:0.25rem 0.9rem; border-radius:20px; font-weight:700; font-size:1.1rem; border:1px solid rgba(139,148,158,0.3);display:inline-block; }
     .reason-item  { padding:0.35rem 0; border-bottom:1px solid rgba(255,255,255,0.04); font-size:0.85rem; }
     .reason-item:last-child { border-bottom: none; }
@@ -105,6 +113,8 @@ VIX_CAUTION = 20.0   # 15–20 → narrow ATR, flag
 VIX_DANGER  = 25.0   # above → suppress options signals
 
 # Nifty/BankNifty weekly expiry days (0=Mon … 6=Sun)
+# NOTE: NSE has changed weekly-expiry rules over time (Bank Nifty / FinNifty
+# weeklies were discontinued). Verify these against the current NSE calendar.
 EXPIRY_WEEKDAY = {
     "13": 3,   # Nifty → Thursday
     "25": 2,   # Bank Nifty → Wednesday
@@ -127,24 +137,50 @@ DHAN_HEADERS = lambda: {
 }
 
 def pull_historical_dhan(security_id, exchange_segment, instrument_type, days_back, interval=None):
-    url = "https://api.dhan.co/v2/charts/historical"
-    payload = {
-        "securityId": str(security_id),
-        "exchangeSegment": exchange_segment,
-        "instrument": instrument_type,
-        "expiryCode": 0,
-        "fromDate": (pd.Timestamp.now() - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d"),
-        "toDate":   pd.Timestamp.now().strftime("%Y-%m-%d"),
-    }
+    """
+    PATCH 1 — route to the correct Dhan v2 endpoint.
+
+      • interval set  → POST /v2/charts/intraday
+                        (1/5/15/25/60-min candles; Dhan caps this at the
+                         LAST 5 TRADING DAYS regardless of days_back)
+      • interval None → POST /v2/charts/historical
+                        (daily OHLC; requires expiryCode, no interval)
+
+    The two endpoints take different payloads. The original code always hit
+    /charts/historical and merely appended `interval`, which the daily
+    endpoint ignores — so every "intraday" sync was really returning daily
+    candles. That left live_candles with too few rows for the indicator
+    pipeline and produced the permanent "Awaiting Data" state.
+    """
     if interval:
-        payload["interval"] = interval
+        url = "https://api.dhan.co/v2/charts/intraday"
+        payload = {
+            "securityId":      str(security_id),
+            "exchangeSegment": exchange_segment,
+            "instrument":      instrument_type,
+            "interval":        str(interval),   # "1" | "5" | "15" | "25" | "60"
+            "oi":              False,
+            "fromDate": (pd.Timestamp.now() - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d"),
+            "toDate":          pd.Timestamp.now().strftime("%Y-%m-%d"),
+        }
+    else:
+        url = "https://api.dhan.co/v2/charts/historical"
+        payload = {
+            "securityId":      str(security_id),
+            "exchangeSegment": exchange_segment,
+            "instrument":      instrument_type,
+            "expiryCode":      0,
+            "oi":              False,
+            "fromDate": (pd.Timestamp.now() - pd.Timedelta(days=days_back)).strftime("%Y-%m-%d"),
+            "toDate":          pd.Timestamp.now().strftime("%Y-%m-%d"),
+        }
     try:
         res = requests.post(url, json=payload, headers=DHAN_HEADERS(), timeout=15)
         if res.status_code in (401, 403):
             st.error("🔑 Dhan token expired. Regenerate at https://dhan.co")
             return []
         if res.status_code != 200:
-            st.error(f"Dhan API error {res.status_code}")
+            st.error(f"Dhan API error {res.status_code} ({'intraday' if interval else 'historical'})")
             return []
         data = res.json()
         timestamps = data.get("timestamp", data.get("start_Time", []))
@@ -211,6 +247,9 @@ def fetch_option_chain_pcr(security_id: str) -> dict:
     Required headers: access-token + client-id (both mandatory per Dhan docs).
     UnderlyingScrip must be int, Expiry must be a valid date string "YYYY-MM-DD".
 
+    PATCH 4 — Dhan throttles the option-chain endpoint; firing expirylist and
+    optionchain back-to-back can fail. A short sleep is inserted between them.
+
     Response structure: data.oc is a dict keyed by strike price strings,
     each value has "ce" and "pe" sub-dicts with "oi", "last_price", greeks etc.
     """
@@ -241,6 +280,9 @@ def fetch_option_chain_pcr(security_id: str) -> dict:
 
         # Dhan returns dates as "YYYY-MM-DD" strings, sorted nearest first
         nearest_expiry = expiry_list[0]
+
+        # PATCH 4: respect Dhan's option-chain throttle before the second call
+        time.sleep(1.2)
 
         # Step 2: fetch full option chain for nearest expiry
         chain_payload = {
@@ -775,7 +817,7 @@ def sync_data(symbol, seg, inst, name, days_back, interval, cleanup_days, table=
         cutoff = (pd.Timestamp.now() - pd.Timedelta(days=cleanup_days)).isoformat()
         supabase.table(table).delete().eq("symbol", str(symbol)).lt("timestamp", cutoff).execute()
         if show_status:
-            st.success(f"✅ Synced {len(payload_list)} candles")
+            st.success(f"✅ Synced {len(payload_list)} candles → {table}")
         return True
     except Exception as e:
         if show_status:
@@ -867,13 +909,13 @@ with st.sidebar:
     sync_clicked = st.button("🔄 Sync Now", use_container_width=True)
     if st.button("🔄 Sync All Timeframes", use_container_width=True):
         with st.spinner("Syncing 5m, 1H, 1D…"):
-            # 5m — always 7 days intraday
+            # 5m — intraday endpoint; Dhan caps intraday at last 5 trading days
             ok5  = sync_data(str(active_sec_id), active_seg, active_inst, display_name,
                              7, "5", 7, table="live_candles")
-            # 1H — always 30 days of 60-min candles regardless of current mode
+            # 1H — intraday endpoint with interval "60" (still capped at ~5 trading days)
             ok1h = sync_data(str(active_sec_id), active_seg, active_inst, display_name,
                              30, "60", 30, table="candles_1h")
-            # 1D — always 200 days of daily candles; needs 150+ for reliable EMA 50
+            # 1D — daily/historical endpoint; 200 days, needs 150+ for reliable EMA 50
             ok1d = sync_data(str(active_sec_id), active_seg, active_inst, display_name,
                              200, None, 200, table="candles_1d")
             # Clear session sync stamp so auto-sync doesn't skip on next rerun
@@ -892,11 +934,11 @@ with st.sidebar:
 # ==================== MANUAL SYNC ====================
 if sync_clicked:
     if data_mode == "Daily (Swing)":
-        # Daily mode: refresh the 1D candles table
+        # Daily mode: refresh the 1D candles table (historical endpoint)
         sync_data(str(active_sec_id), active_seg, active_inst, display_name,
                   200, None, 200, table="candles_1d")
     else:
-        # Intraday mode: refresh the 5m candles table
+        # Intraday mode: refresh the 5m candles table (intraday endpoint)
         sync_data(str(active_sec_id), active_seg, active_inst, display_name,
                   7, "5", 7, table="live_candles")
 
@@ -910,9 +952,9 @@ else:
 
 # ==================== LOAD DATA ====================
 # Table layout (fixed, mode-independent):
-#   live_candles  → 5m intraday candles  (7 days)
-#   candles_1h    → 1H candles           (30 days)
-#   candles_1d    → daily candles        (200 days)
+#   live_candles  → 5m intraday candles  (intraday endpoint, ~5 trading days)
+#   candles_1h    → 1H candles           (intraday endpoint, ~5 trading days)
+#   candles_1d    → daily candles        (historical endpoint, 200 days)
 #
 # Daily mode uses candles_1d for its chart — NOT live_candles.
 # This prevents the two modes from overwriting each other in the same table.
@@ -966,12 +1008,15 @@ if signal_changed:
     if enable_journal:
         log_signal_to_journal(copilot, display_name, mode_label)
     if enable_alerts and copilot["confidence"] >= alert_threshold and not copilot["suppressed"]:
+        # PATCH 2 — pre-format VIX outside the f-string (the old inline
+        # `{vix:.1f if vix else 'N/A'}` is an invalid format spec and crashes).
+        vix_str = f"{vix:.1f}" if vix is not None else "N/A"
         msg = (
             f"*⚡ AI Options Copilot — {display_name}*\n"
             f"Signal: *{copilot.get('option_action') or copilot['direction']}*\n"
             f"Regime: {copilot['regime']} | Score: {copilot['score']}% | Conf: {copilot['confidence']}%\n"
             f"Entry: {copilot['entry']} | SL: {copilot['stop_loss']} | T1: {copilot['target_1']}\n"
-            f"VIX: {vix:.1f if vix else 'N/A'} | PCR: {copilot['pcr'] or 'N/A'}\n"
+            f"VIX: {vix_str} | PCR: {copilot['pcr'] or 'N/A'}\n"
             f"MTF aligned: {'✅' if copilot['mtf_aligned'] else '❌'}"
         )
         send_telegram_alert(msg)
@@ -989,7 +1034,7 @@ st.caption(
 )
 
 if df_5m.empty:
-    st.info("📭 No data. Use sidebar to sync.")
+    st.info("📭 No 5m data. Use the sidebar → **Sync All Timeframes** to populate live_candles.")
     st.stop()
 
 # Suppression banner
@@ -1044,7 +1089,8 @@ with col_left:
             fig.add_hline(y=s, line_dash="dot", line_color="rgba(46,160,67,0.4)", line_width=1, row=1, col=1)
 
         # Volume
-        colors = ["#3fb950" if chart_df["close"].iloc[i] >= chart_df["open"].iloc[i] else "#f85149" for i in range(len(df_5m))]
+        # PATCH 3 — iterate the frame actually being plotted (chart_df), not df_5m.
+        colors = ["#3fb950" if chart_df["close"].iloc[i] >= chart_df["open"].iloc[i] else "#f85149" for i in range(len(chart_df))]
         fig.add_trace(go.Bar(x=chart_df["timestamp"], y=chart_df["volume"], name="Volume", marker_color=colors), row=2, col=1)
         if "VMA_20" in chart_df.columns:
             fig.add_trace(go.Scatter(x=chart_df["timestamp"], y=chart_df["VMA_20"], name="Vol MA",
